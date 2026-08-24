@@ -130,3 +130,20 @@ FRAME_TIMEOUT_SECONDS = _env_int("QUEST1_FRAME_TIMEOUT", 180)
 # Only used when a stream URL declares no expiry of its own; otherwise the URL's
 # own expire= timestamp governs. Keeps a repeat query from re-running yt-dlp.
 RESOLVE_CACHE_TTL_SECONDS = _env_int("QUEST1_RESOLVE_CACHE_TTL", 3600)
+
+# --- Web / job layer ---------------------------------------------------------
+# Finished jobs are kept this long so a browser that reconnects late can still
+# read its result, then pruned so a long-running server does not grow forever.
+JOB_RETENTION_SECONDS = _env_int("QUEST1_JOB_RETENTION", 3600)
+
+# Hard cap on retained jobs, pruned oldest-finished-first. A second guard for
+# the case where many jobs arrive inside the retention window.
+JOB_MAX_RETAINED = _env_int("QUEST1_JOB_MAX_RETAINED", 200)
+
+# How often the SSE endpoint checks for new progress events. Small enough to
+# feel live, large enough not to spin a CPU core per connected browser.
+SSE_POLL_INTERVAL_SECONDS = float(os.environ.get("QUEST1_SSE_POLL_INTERVAL", "0.2"))
+
+# SSE comment sent when nothing has happened, so proxies do not close an idle
+# connection during a long ASR stage.
+SSE_KEEPALIVE_SECONDS = _env_int("QUEST1_SSE_KEEPALIVE", 15)

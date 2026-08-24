@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quest1 — find the frame</title>
+<!--
+  Quest1 frontend. Plain HTML/CSS/JS: no framework, no build step, no npm.
+
+  WHY NO FRAMEWORK: the page has one form, one progress bar and one result
+  panel. A build step would add tooling to maintain for no benefit, and this
+  file can be opened and read in full by anyone reviewing the project.
+
+  IT TALKS TO app/api.py ONLY:
+      POST /api/find                 -> { job_id }
+      GET  /api/jobs/{id}/events     -> SSE progress stream
+      GET  /api/frame/{id}.png       -> the extracted frame
+
+  ERROR POLICY: every failure path renders something visible. A silent failure
+  would leave the user staring at a stalled progress bar with no explanation.
+-->
+<style>
+  /* Palette defined once on :root, with a dark variant. */
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #dfe3e8;
+    --text: #1a1d21;
+    --muted: #666e78;
+    --accent: #2563eb;
+    --accent-soft: #e8effd;
+    --ok: #15803d;
+    --ok-soft: #e6f4ea;
+    --warn: #b45309;
+    --warn-soft: #fdf1e3;
+    --err: #b91c1c;
+    --err-soft: #fdeaea;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a;
+      --panel: #1c2024;
+      --border: #2f353b;
+      --text: #e8eaed;
+      --muted: #9aa3ad;
+      --accent: #6098ff;
+      --accent-soft: #1d2a44;
+      --ok: #6ee7a0;
+      --ok-soft: #16311f;
+      --warn: #f5b866;
+      --warn-soft: #3a2a12;
+      --err: #ff8a8a;
+      --err-soft: #3a1b1b;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1rem 4rem;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+
+  header { margin-bottom: 1.5rem; }
+  h1 { margin: 0 0 .25rem; font-size: 1.5rem; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); font-size: .93rem; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.15rem;
+    margin-bottom: 1.15rem;
+  }
+
+  label { display: block; font-weight: 600; font-size: .86rem; margin-bottom: .35rem; }
+  input[type=text] {
+    width: 100%;
+    padding: .6rem .7rem;
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .field { margin-bottom: .9rem; }
+  .hint { color: var(--muted); font-size: .8rem; margin-top: .3rem; }
+
+  .row { display: flex; gap: .7rem; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit; font-weight: 600;
+    padding: .6rem 1.15rem;
+    color: #fff; background: var(--accent);
+    border: 0; border-radius: 7px; cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: progress; }
+  .checkbox { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
+
+  /* --- progress --- */
+  .bar {
+    height: 8px; background: var(--border);
+    border-radius: 99px; overflow: hidden; margin: .2rem 0 .9rem;
+  }
+  .bar > div {
+    height: 100%; width: 0%;
+    background: var(--accent);
+    transition: width .25s ease;
+  }
+  .stages { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .8rem; }
+  .stage {
+    font-size: .78rem; padding: .22rem .55rem;
+    border: 1px solid var(--border); border-radius: 99px;
+    color: var(--muted);
+  }
+  .stage.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .stage.done   { border-color: transparent; color: var(--ok); background: var(--ok-soft); }
+  .log {
+    font-family: var(--mono); font-size: .78rem;
+    color: var(--muted);
+    max-height: 170px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .log div { padding: .08rem 0; }
+
+  /* --- result --- */
+  .answer {
+    font-family: var(--mono); font-size: .95rem;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: .9rem 1rem;
+    white-space: pre-wrap; word-break: break-all;
+    margin-bottom: 1rem;
+  }
+  .answer b { font-weight: 700; }
+  figure { margin: 0 0 1rem; }
+  figure img {
+    max-width: 100%; height: auto; display: block;
+    border: 1px solid var(--border); border-radius: 8px; background: #000;
+  }
+  figcaption { color: var(--muted); font-size: .8rem; margin-top: .4rem; }
+
+  .chip {
+    display: inline-block; font-size: .78rem; font-weight: 600;
+    padding: .18rem .55rem; border-radius: 99px;
+  }
+  .chip.confident { color: var(--ok);   background: var(--ok-soft); }
+  .chip.ambiguous { color: var(--warn); background: var(--warn-soft); }
+  .chip.no_match  { color: var(--err);  background: var(--err-soft); }
+
+  .meta { display: grid; grid-template-columns: max-content 1fr; gap: .35rem .9rem; font-size: .88rem; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; }
+  .context { font-style: italic; color: var(--muted); }
+  .context mark { background: var(--accent-soft); color: var(--text); font-style: normal; padding: 0 .12rem; }
+
+  table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+  th, td { text-align: left; padding: .38rem .5rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: .78rem; }
+  td.t { font-family: var(--mono); white-space: nowrap; }
+
+  .box { border-radius: 8px; padding: .85rem 1rem; margin-bottom: 1rem; font-size: .9rem; }
+  .box.err  { color: var(--err);  background: var(--err-soft);  border: 1px solid var(--err); }
+  .box.warn { color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn); }
+  .box h3 { margin: 0 0 .3rem; font-size: .92rem; }
+  .box code { font-family: var(--mono); font-size: .84rem; }
+
+  h2 { font-size: 1rem; margin: 0 0 .7rem; }
+  h3.sub { font-size: .85rem; color: var(--muted); margin: 1.1rem 0 .5rem; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Quest1</h1>
+    <p>Find the exact video frame where a line of dialogue is spoken.</p>
+  </header>
+
+  <form class="panel" id="form">
+    <div class="field">
+      <label for="url">Video URL</label>
+      <input type="text" id="url" name="url" autocomplete="off" spellcheck="false"
+             placeholder="https://www.youtube.com/watch?v=..."
+             value="https://www.youtube.com/watch?v=jNQXAC9IVRw">
+      <div class="hint">A single video. Playlists, live streams and DRM are refused.</div>
+    </div>
+    <div class="field">
+      <label for="text">Dialogue text</label>
+      <input type="text" id="text" name="text" autocomplete="off"
+             placeholder="the cool thing about these guys"
+             value="the cool thing about these guys">
+      <div class="hint">Punctuation and casing do not matter. Matching is fuzzy.</div>
+    </div>
+    <div class="row">
+      <button type="submit" id="go">Search</button>
+      <label class="checkbox"><input type="checkbox" id="force"> ignore caches</label>
+      <span class="hint" id="firstRunHint">First search on a video runs speech
+        recognition and can take minutes. Later searches are near-instant.</span>
+    </div>
+  </form>
+
+  <section class="panel hidden" id="progressPanel">
+    <h2>Progress <span id="pct" style="color:var(--muted);font-weight:400"></span></h2>
+    <div class="bar"><div id="barFill"></div></div>
+    <div class="stages" id="stages"></div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section id="resultPanel"></section>
+
+</div>
+
+<script>
+"use strict";
+
+/* The pipeline stages, in order, as emitted by app/service.py. Kept in sync
+   with STAGE_ORDER there -- an unknown stage is still displayed, it just will
+   not have a pre-rendered chip. */
+const STAGES = [
+  ["resolve", "resolve"],
+  ["audio",   "audio"],
+  ["probe",   "probe"],
+  ["asr",     "speech recognition"],
+  ["index",   "index"],
+  ["match",   "match"],
+  ["frame",   "frame"],
+];
+
+const $ = (id) => document.getElementById(id);
+const form = $("form"), goBtn = $("go");
+const progressPanel = $("progressPanel"), barFill = $("barFill");
+const pctLabel = $("pct"), stagesEl = $("stages"), logEl = $("log");
+const resultPanel = $("resultPanel");
+
+let source = null;   // the live EventSource, so a new search can close the old one
+
+/* Escape text before putting it in innerHTML. Transcript text and error
+   messages both come from outside this page and must never be treated as
+   markup. */
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderStages() {
+  stagesEl.innerHTML = STAGES
+    .map(([id, label]) => `<span class="stage" data-stage="${id}">${esc(label)}</span>`)
+    .join("");
+}
+
+/* Mark the current stage active and everything before it done, so the user can
+   see how far through the pipeline the job is, not just a percentage. */
+function markStage(stage) {
+  const order = STAGES.map(s => s[0]);
+  const idx = order.indexOf(stage);
+  stagesEl.querySelectorAll(".stage").forEach((el) => {
+    const i = order.indexOf(el.dataset.stage);
+    el.classList.toggle("active", i === idx);
+    el.classList.toggle("done", idx === -1 ? false : i < idx);
+  });
+  if (stage === "done") {
+    stagesEl.querySelectorAll(".stage").forEach(el => {
+      el.classList.remove("active"); el.classList.add("done");
+    });
+  }
+}
+
+function log(line) {
+  const div = document.createElement("div");
+  div.textContent = line;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;   // follow the tail
+}
+
+function setBusy(busy) {
+  goBtn.disabled = busy;
+  goBtn.textContent = busy ? "Searching…" : "Search";
+}
+
+function showError(title, detail, hint) {
+  resultPanel.innerHTML = `
+    <div class="panel">
+      <div class="box err">
+        <h3>${esc(title)}</h3>
+        <div>${esc(detail)}</div>
+        ${hint ? `<div style="margin-top:.5rem">${esc(hint)}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+/* Highlight the matched words inside the surrounding context, so an ambiguous
+   result can be judged at a glance. Falls back to plain context if the exact
+   substring is not present (normalization can make them differ). */
+function contextHtml(context, matched) {
+  if (!context) return "";
+  if (matched && context.includes(matched)) {
+    const i = context.indexOf(matched);
+    return esc(context.slice(0, i))
+         + "<mark>" + esc(matched) + "</mark>"
+         + esc(context.slice(i + matched.length));
+  }
+  return esc(context);
+}
+
+function occurrenceRows(list) {
+  return list.map(o => `
+    <tr>
+      <td class="t">${esc(o.timestamp || fmtTime(o.start_time))}</td>
+      <td class="t">${esc(o.score)}</td>
+      <td>${esc(o.matched_text)}</td>
+    </tr>`).join("");
+}
+
+/* Mirror of matching.format_timestamp, for occurrence lists which carry raw
+   seconds rather than a formatted string. */
+function fmtTime(sec) {
+  if (sec == null) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0") + ":"
+       + s.toFixed(3).padStart(6, "0");
+}
+
+function renderResult(snapshot) {
+  const r = snapshot.result;
+  if (!r) { showError("No result", "The job finished but returned no result."); return; }
+
+  if (r.status === "not_found") {
+    const near = (r.near_misses || []).length ? `
+      <h3 class="sub">Closest lines in the transcript</h3>
+      <table>
+        <thead><tr><th>Time</th><th>Score</th><th>Transcript says</th></tr></thead>
+        <tbody>${occurrenceRows(r.near_misses)}</tbody>
+      </table>
+      <p class="hint">If one of these is what you meant, the speech recogniser heard
+      it differently from how you typed it. Try searching for the words above.</p>`
+      : `<p class="hint">Nothing in the transcript was close enough to suggest.</p>`;
+
+    resultPanel.innerHTML = `
+      <div class="panel">
+        <div class="box warn">
+          <h3>Not found</h3>
+          <div>No dialogue matching <code>${esc(r.query)}</code> was found in
+               &ldquo;${esc(r.title)}&rdquo; above the match threshold.</div>
+        </div>
+        ${near}
+        <dl class="meta" style="margin-top:1rem">
+          <dt>media key</dt><dd class="t">${esc(r.media_key)}</dd>
+          <dt>cached</dt><dd>${esc((r.cached_stages || []).join(", ") || "nothing")}</dd>
+          <dt>elapsed</dt><dd>${esc(r.elapsed_seconds)}s</dd>
+        </dl>
+      </div>`;
+    return;
+  }
+
+  /* status === "found" -- the four required fields, in the required order. */
+  const frameText = r.frame_number === null || r.frame_number === undefined
+    ? "null (variable frame rate)" : r.frame_number;
+
+  const others = (r.other_occurrences || []).length ? `
+    <h3 class="sub">Also said at</h3>
+    <table>
+      <thead><tr><th>Time</th><th>Score</th><th>Transcript says</th></tr></thead>
+      <tbody>${occurrenceRows(r.other_occurrences)}</tbody>
+    </table>
+    <p class="hint">This line occurs more than once. The frame above is the
+       first, highest-scoring occurrence.</p>` : "";
+
+  resultPanel.innerHTML = `
+    <div class="panel">
+      <h2>Result <span class="chip ${esc(r.band)}">${esc(r.band)}</span></h2>
+
+      <div class="answer"><b>Timestamp</b> : ${esc(r.timestamp)}
+<b>Frame</b>     : ${esc(frameText)}
+<b>Text</b>      : "${esc(r.matched_text)}"
+<b>Image</b>     : ${esc(r.image_path)}</div>
+
+      <figure>
+        <img src="/api/frame/${esc(snapshot.job_id)}.png"
+             alt="Video frame at ${esc(r.timestamp)}"
+             onerror="this.replaceWith(Object.assign(document.createElement('div'),
+                      {className:'box err', textContent:'The frame image could not be loaded from /api/frame/${esc(snapshot.job_id)}.png'}));">
+        <figcaption>${esc(r.title)} — frame ${esc(frameText)} at ${esc(r.timestamp)}</figcaption>
+      </figure>
+
+      <dl class="meta">
+        <dt>score</dt><dd>${esc(r.score)} / 100 &nbsp; <span class="chip ${esc(r.band)}">${esc(r.band)}</span></dd>
+        <dt>context</dt><dd class="context">…${contextHtml(r.context, r.matched_text)}…</dd>
+        <dt>frame pts</dt><dd class="t">${esc(r.frame_pts)}</dd>
+        <dt>media key</dt><dd class="t">${esc(r.media_key)}</dd>
+        <dt>cached</dt><dd>${esc((r.cached_stages || []).join(", ") || "nothing (first run)")}</dd>
+        <dt>elapsed</dt><dd>${esc(r.elapsed_seconds)}s</dd>
+      </dl>
+
+      ${r.frame_note ? `<div class="box warn" style="margin-top:1rem">${esc(r.frame_note)}</div>` : ""}
+      ${others}
+    </div>`;
+}
+
+form.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+
+  // A previous stream must be closed or its events would interleave with the new job's.
+  if (source) { source.close(); source = null; }
+
+  resultPanel.innerHTML = "";
+  logEl.innerHTML = "";
+  barFill.style.width = "0%";
+  pctLabel.textContent = "";
+  renderStages();
+  progressPanel.classList.remove("hidden");
+  setBusy(true);
+
+  const payload = {
+    url: $("url").value.trim(),
+    text: $("text").value.trim(),
+    force: $("force").checked,
+  };
+
+  let job;
+  try {
+    const res = await fetch("/api/find", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      // FastAPI wraps our error body in `detail`; pydantic validation errors
+      // put a list there instead. Handle both rather than showing "[object Object]".
+      const d = body.detail;
+      let msg;
+      if (typeof d === "string") msg = d;
+      else if (d && d.error) msg = d.error;
+      else if (Array.isArray(d)) msg = d.map(e => e.msg || JSON.stringify(e)).join("; ");
+      else msg = JSON.stringify(body);
+      showError(`Request rejected (HTTP ${res.status})`, msg);
+      progressPanel.classList.add("hidden");
+      setBusy(false);
+      return;
+    }
+    job = body;
+  } catch (err) {
+    showError("Could not reach the server", String(err),
+              "Is it running?  uvicorn app.api:app --port 8000");
+    progressPanel.classList.add("hidden");
+    setBusy(false);
+    return;
+  }
+
+  log(`job ${job.job_id} accepted`);
+
+  source = new EventSource(`/api/jobs/${job.job_id}/events`);
+
+  source.addEventListener("progress", (ev) => {
+    const d = JSON.parse(ev.data);
+    barFill.style.width = d.percent + "%";
+    pctLabel.textContent = d.percent.toFixed(0) + "%";
+    markStage(d.stage);
+    log(`[${d.stage}] ${d.message}`);
+  });
+
+  source.addEventListener("done", (ev) => {
+    const snapshot = JSON.parse(ev.data);
+    barFill.style.width = "100%";
+    pctLabel.textContent = "100%";
+    markStage("done");
+    log("finished");
+    renderResult(snapshot);
+    source.close(); source = null;
+    setBusy(false);
+  });
+
+  source.addEventListener("error", (ev) => {
+    // Two very different things arrive here: a server-sent `event: error`
+    // (which carries data) and a transport failure (which does not).
+    if (ev.data) {
+      const d = JSON.parse(ev.data);
+      log(`ERROR ${d.error_type}: ${d.error}`);
+      showError(d.error_type || "Processing failed", d.error);
+    } else if (source && source.readyState === EventSource.CLOSED) {
+      showError("Connection to the server was lost",
+                "The progress stream closed before the job finished.",
+                "Check the server log, then reload and try again.");
+    } else {
+      return;   // transient reconnect; EventSource retries on its own
+    }
+    if (source) { source.close(); source = null; }
+    setBusy(false);
+  });
+});
+
+renderStages();
+</script>
+</body>
+</html>

@@ -1,0 +1,356 @@
+================================================================================
+QUEST1 -- CONSTANTS, THRESHOLDS AND PARAMETERS REFERENCE
+================================================================================
+
+Every tunable value in the system, what it does, why it has the value it has,
+and what happens if you change it.
+
+All values live in app/config.py and are overridable by environment variable --
+no code edit is needed to retune anything below.
+
+Values shown are the DEFAULTS as of Step 8. To see what is actually in effect:
+
+    python -c "from app import config; [print(k, '=', getattr(config,k)) for k in sorted(dir(config)) if k.isupper()]"
+
+
+================================================================================
+1. INPUT LIMITS
+================================================================================
+
+MAX_VIDEO_DURATION_SECONDS = 3600          env: QUEST1_MAX_DURATION
+    Videos longer than this are refused outright.
+    WHY 1 hour: ASR cost is linear in duration and runs at ~0.7x realtime on
+    CPU, so a 1-hour video already costs ~43 minutes to index the first time.
+    RAISE IT if you are indexing long content and can wait; the refusal is a
+    guard against accidental multi-hour jobs, not a technical limit.
+    ENFORCED IN: app/core/resolve.py, _reject_unsupported()
+
+MAX_VIDEO_HEIGHT = 1080                    env: QUEST1_MAX_VIDEO_HEIGHT
+    Cap on the video format chosen for frame extraction.
+    WHY: the extracted PNG is one frame. 4K buys little visible quality for a
+    single still and costs several times the bytes on every ranged read.
+    LOWER IT to make frame extraction faster on a slow connection.
+    ENFORCED IN: app/core/resolve.py, select_video_format()
+
+MIN_QUERY_CHARS = 3                        env: QUEST1_MIN_QUERY_CHARS
+    Minimum length of the NORMALIZED query.
+    WHY: a 1-2 character query fuzzy-matches almost anywhere in a transcript,
+    so the timestamp it returns would be meaningless. Rejected loudly rather
+    than answered badly.
+    ENFORCED IN: app/core/matching.py, find_matches()
+
+
+================================================================================
+2. MATCHING THRESHOLDS   <-- THE MOST LIKELY THINGS YOU WILL WANT TO TUNE
+================================================================================
+
+All scores are rapidfuzz partial_ratio values on a 0-100 scale.
+
+MATCH_THRESHOLD = 70.0                     env: QUEST1_MATCH_THRESHOLD
+    Minimum score for a span to count as an occurrence at all.
+    BELOW 70 the result is reported as no_match.
+    OBSERVED: an exact phrase scores 100. A phrase with one word dropped and
+    different punctuation scored 82.9. Unrelated text scored 45-55.
+    LOWER IT (e.g. 60) if real matches are being missed because the ASR
+    transcription differs a lot from the typed text.
+    RAISE IT (e.g. 80) if unrelated lines are being returned as matches.
+    RISK OF LOWERING: near-miss noise starts being presented as real answers.
+    ENFORCED IN: app/core/matching.py, find_matches() -> _search()
+
+CONFIDENT_THRESHOLD = 88.0                 env: QUEST1_CONFIDENT_THRESHOLD
+    At or above this score, a single occurrence is labelled "confident".
+    Between MATCH_THRESHOLD and this, it is labelled "ambiguous".
+    WHY 88: leaves room for minor ASR differences (a dropped article, a
+    contraction) to still read as confident, while a materially different
+    phrasing drops to ambiguous.
+    ENFORCED IN: app/core/matching.py, classify()
+
+AMBIGUITY_MARGIN = 5.0                     env: QUEST1_AMBIGUITY_MARGIN
+    If the RUNNER-UP occurrence scores within this margin of the best one, the
+    result is downgraded to "ambiguous" even when the best score is perfect.
+    WHY THIS EXISTS: a line said three times has three equally valid answers.
+    Returning one as "confident" would present a coin-flip as a fact. This is
+    the arbitration rule that keeps the system honest about uncertainty.
+    RAISE IT to be more cautious about multi-occurrence answers.
+    ENFORCED IN: app/core/matching.py, classify()
+
+MAX_OCCURRENCES = 20                       env: QUEST1_MAX_OCCURRENCES
+    Safety valve on the mask-and-repeat search loop.
+    WHY: a very short or very common query could otherwise match hundreds of
+    places and produce an unusable response.
+    ENFORCED IN: app/core/matching.py, _search()
+
+NEAR_MISS_THRESHOLD = 45.0                 env: QUEST1_NEAR_MISS_THRESHOLD
+NEAR_MISS_COUNT = 3                        env: QUEST1_NEAR_MISS_COUNT
+    When nothing clears MATCH_THRESHOLD, show up to NEAR_MISS_COUNT closest
+    spans scoring at least NEAR_MISS_THRESHOLD.
+    WHY A FLOOR AT ALL: without it, every no-match would show three random
+    fragments, presenting noise as a hint. 45 is above the score unrelated
+    text tends to reach on short transcripts.
+    PURPOSE: lets the user tell "I mistyped the quote" from "the ASR misheard
+    it" from "that line is not in this video".
+    ENFORCED IN: app/core/matching.py, find_matches()
+
+CONFIDENCE BAND NAMES (do not change without updating the frontend)
+    BAND_CONFIDENT = "confident"
+    BAND_AMBIGUOUS = "ambiguous"
+    BAND_NO_MATCH  = "no_match"
+
+
+================================================================================
+3. ASR / TRANSCRIPTION
+================================================================================
+
+ASR_MODEL = "small"                        env: QUEST1_ASR_MODEL
+    faster-whisper model name.
+    OBSERVED on this machine (CPU, int8): 19s of audio took 8.8-12.8s, i.e.
+    roughly 0.7x realtime. A 10-minute video therefore costs ~7 minutes to
+    index the FIRST time only; every later query on it is sub-second.
+    OPTIONS, fastest to most accurate:
+        tiny    ~75MB   fastest, noticeably worse on accents and fast speech
+        base    ~145MB  good speed/accuracy compromise
+        small   ~484MB  CURRENT DEFAULT
+        medium  ~1.5GB  slower, better on difficult audio
+        large-v3 ~3GB   best accuracy, impractical on CPU
+    TUNING NOTE: if a phrase is not being found, check what the model actually
+    heard (python -m app.core.asr <wav>) BEFORE lowering MATCH_THRESHOLD.
+    A bigger model often fixes what looks like a matching problem.
+    First use downloads the model to ~/.cache/huggingface.
+
+ASR_DEVICE = "cpu"                         env: QUEST1_ASR_DEVICE
+    Set to "cuda" if a CUDA GPU is available -- roughly an order of magnitude
+    faster, and the single biggest speedup available to this system.
+
+ASR_COMPUTE_TYPE = "int8"                  env: QUEST1_ASR_COMPUTE_TYPE
+    Quantisation. int8 is ~2x faster than float32 on CPU with negligible
+    accuracy cost. Use "float16" on GPU.
+
+ASR_BEAM_SIZE = 5                          env: QUEST1_ASR_BEAM_SIZE
+    Decoding beam width. Lower (1) is faster and slightly less accurate.
+
+ASR_LANGUAGE = None                        env: QUEST1_ASR_LANGUAGE
+    None = auto-detect. Set to "en" to skip detection -- marginally faster and
+    removes the risk of a short clip being detected as the wrong language.
+    OBSERVED: test video auto-detected as "en" with probability 0.97.
+
+ASR_VAD_FILTER = True                      env: QUEST1_ASR_VAD ("0" disables)
+    Voice-activity detection trims silence before decoding.
+    WHY ON: faster, and it stops Whisper hallucinating text over long silent
+    or music-only stretches -- hallucinated text produces false matches.
+
+ALL ENFORCED IN: app/core/asr.py, transcribe()
+
+
+================================================================================
+4. AUDIO PROCESSING
+================================================================================
+
+AUDIO_SAMPLE_RATE = 16000                  env: QUEST1_AUDIO_SAMPLE_RATE
+AUDIO_CHANNELS = 1                         env: QUEST1_AUDIO_CHANNELS
+    DO NOT CHANGE without good reason. Whisper resamples everything to 16kHz
+    mono internally; producing it up front keeps the wav small and avoids a
+    second resample. Any other value just wastes disk and time.
+
+AUDIO_BYTES_PER_SECOND = 32000             (derived, not directly settable)
+    = SAMPLE_RATE x CHANNELS x 2 bytes (16-bit PCM).
+    USE: sanity-check a produced wav. Expected size = duration x 32000.
+    OBSERVED: 19.0s video -> 610,112 bytes vs 608,000 expected (ratio 1.003).
+    A ratio far from 1.0 means a truncated or misconfigured fetch.
+
+AUDIO_DURATION_TOLERANCE_SECONDS = 2       env: QUEST1_AUDIO_TOLERANCE
+AUDIO_DURATION_TOLERANCE_RATIO = 0.05      (5%, not env-overridable)
+    A produced wav shorter than the video by more than
+    max(2 seconds, 5% of duration) is treated as a TRUNCATED FETCH and raises.
+    WHY THIS MATTERS MORE THAN IT LOOKS: a silently truncated wav would
+    transcribe only the first part of the video, and every query for a line in
+    the missing part would return "not found" with no indication anything was
+    wrong. Failing loudly is the entire point.
+    ENFORCED IN: app/core/audio.py, _validate_wav()
+
+
+================================================================================
+5. FRAME EXTRACTION
+================================================================================
+
+FRAME_PREROLL_SECONDS = 5.0                env: QUEST1_FRAME_PREROLL
+    How far BEFORE the target the coarse seek lands, so the decoder has a
+    keyframe to start from. The remainder is consumed by a fine seek.
+    TOO SMALL: the coarse seek may land after the preceding keyframe and the
+    extraction fails or produces the wrong frame.
+    TOO LARGE: ffmpeg decodes more frames than necessary; slower but correct.
+    5s comfortably exceeds the typical 2s keyframe interval.
+    ENFORCED IN: app/core/frame.py, _run_extraction()
+
+FRAME_URL_EXPIRY_MARGIN_SECONDS = 60       env: QUEST1_FRAME_EXPIRY_MARGIN
+    A signed CDN URL within this many seconds of expiry is re-resolved BEFORE
+    use rather than being allowed to fail first.
+    WHY: extraction is not instantaneous. A URL valid for two more seconds is
+    not actually usable.
+    ENFORCED IN: app/core/frame.py, _url_is_stale()
+
+FRAME_TIMEOUT_SECONDS = 180                env: QUEST1_FRAME_TIMEOUT
+    Hard limit on a single frame extraction.
+    OBSERVED: 0.86s for 240p, 3.85s for 1080p at 500s into a 10-minute video.
+    180s is far above normal -- it exists so a hung connection fails rather
+    than blocking forever.
+
+FRAME NUMBER ARITHMETIC (not a constant, but the rule that matters)
+    frame_number = floor(timestamp_seconds x fps)
+    FLOOR, not round: the frame ON SCREEN at time t is the one whose interval
+    [N/fps, (N+1)/fps) contains t.
+    VFR SOURCES: when r_frame_rate != avg_frame_rate (>1% relative), no frame
+    number is computed. Returns null plus an explanation. The extracted IMAGE
+    is still correct; only the integer is unavailable.
+    VFR DETECTION TOLERANCE: 1% relative difference (hardcoded in
+    app/core/audio.py, ensure_probe() -- float noise is not VFR).
+
+
+================================================================================
+6. CACHING
+================================================================================
+
+INDEX_VERSION = 1                          (deliberately NOT env-overridable)
+    *** BUMP THIS to invalidate every transcript index on disk. ***
+    YOU MUST BUMP IT after changing any of:
+        - the normalization rules in app/core/normalize.py
+        - the word/segment schema written to transcript.json
+        - anything that changes what the ASR produces in a structural way
+    WHY: a stale index would silently produce wrong character offsets, and
+    therefore wrong timestamps, with no error anywhere.
+    ENFORCED IN: app/core/index.py, load_index() -- a version mismatch is
+    treated as "no index", so the next query rebuilds it.
+
+RESOLVE_CACHE_TTL_SECONDS = 3600           env: QUEST1_RESOLVE_CACHE_TTL
+    Fallback age limit for a cached resolve, used ONLY when the stream URL
+    declares no expiry of its own. When it does (YouTube URLs carry
+    ?expire=<unix ts>), that timestamp governs instead.
+    WHY IT EXISTS: without a resolve cache every query paid ~2.5s for a fresh
+    yt-dlp extraction, which made the sub-second repeat query impossible.
+
+WHAT IS CACHED, AND BY WHAT KEY
+    resolve      data/_resolve/{sha256(url)[:24]}.json    keyed by URL
+    audio.wav    data/{media_key}/audio.wav               keyed by media_key
+    probe.json   data/{media_key}/probe.json              keyed by media_key
+    transcript   data/{media_key}/transcript.json         keyed by media_key
+    index.json   data/{media_key}/index.json              keyed by media_key
+    frames       data/{media_key}/frames/frame_<ms>.png   keyed by timestamp
+
+    MATCHING IS NEVER CACHED -- it takes milliseconds and depends on the query.
+
+media_key FORMAT: {extractor}-{video_id}-{sha256(extractor:id)[:10]}
+    e.g. youtube-jnqxac9ivrw-103eea2ce1
+    DERIVED FROM extractor + video id ONLY, never from the stream URL.
+    WHY THIS IS THE KEY DESIGN DECISION: signed URLs rotate on every resolve,
+    so a URL-derived key would miss the cache every time and re-run ASR on
+    every single query.
+
+
+================================================================================
+7. NETWORKING
+================================================================================
+
+NETWORK_TIMEOUT_SECONDS = 20               env: QUEST1_NETWORK_TIMEOUT
+    Socket timeout for yt-dlp and for the HTTP Range probe.
+    ffprobe of a remote stream gets 6x this (120s), since it may need several
+    round trips to read a container header.
+
+HTTP RECONNECT ARGS (hardcoded, app/core/ffmpeg.py)
+    -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5
+    Applied to every remote input so a dropped connection retries rather than
+    silently truncating the output.
+
+REQUIRED HOST BEHAVIOUR
+    The video host MUST honour HTTP Range requests. Verified at resolve time by
+    requesting bytes 0-1 and checking for 206 Partial Content.
+    OBSERVED on YouTube: "HTTP 206 Partial Content (Content-Range: bytes
+    0-1/433081)". Without this the whole no-download design is impossible.
+
+FORMAT SELECTION RULES (app/core/resolve.py)
+    Audio: highest-bitrate AUDIO-ONLY format (vcodec == "none").
+           Falls back to the LOWEST-bitrate progressive format only if no
+           audio-only stream exists -- that path costs video bytes.
+    Video: prefers VIDEO-ONLY (DASH) formats so ranged reads pull no audio.
+           REQUIRES protocol in {http, https}. HLS/DASH manifests are rejected
+           because they are not single seekable byte streams.
+
+
+================================================================================
+8. OBSERVED PERFORMANCE (measured, not estimated)
+================================================================================
+
+Test video: youtube jNQXAC9IVRw "Me at the zoo", 19s, 240p, 15fps CFR
+
+    resolve (cold)              ~2.5s
+    resolve (cached)            ~0.00s
+    audio fetch + transcode     0.6-1.1s      610,112 bytes
+    video probe                 ~1.0s
+    ASR (small, cpu, int8)      8.8-12.8s     36 words, 3 segments
+    matching                    ~0.001s
+    frame extraction (240p)     0.86s         105,647 bytes
+
+    COLD full pipeline          19.0-24.9s
+    WARM, different text        0.87s         (ASR skipped)
+    WARM, same text             0.04-0.08s    (frame also cached)
+    NOT FOUND                   0.03s         (no frame extracted)
+
+Long-video ranged seek check: youtube YE7VzlLtp-4, 10 min, 1080p, 24fps
+    probe                       ~1s
+    frame at 500s               3.85s         546,156 bytes -> frame 12000
+    TOTAL ON DISK               537K          (probe.json + one PNG)
+    ^ proves no video download: the full 1080p stream is far larger.
+
+STAGE WEIGHTS for the progress bar (app/service.py, STAGE_WEIGHTS)
+    resolve 5 | audio 20 | probe 5 | asr 50 | index 5 | match 5 | frame 10
+    Rough relative cost on a COLD run. ASR dominates by design. These only
+    need to be approximately right for the bar to move smoothly.
+
+
+================================================================================
+9. TEXT NORMALIZATION RULES (app/core/normalize.py)
+================================================================================
+
+Applied identically at INDEX time and at QUERY time. If these two ever diverge,
+correct queries silently fail to match correct transcripts.
+*** ANY CHANGE HERE REQUIRES BUMPING INDEX_VERSION. ***
+
+    1. Unicode NFKC normalization
+    2. Curly quotes/apostrophes -> ASCII  ("don't" -> "don't")
+    3. Hyphens, dashes, slashes, underscores -> SPACE
+       so "well-known" matches the spoken "well known"
+    4. Everything not a letter, digit or space is REMOVED
+       so "don't" and "dont" normalize identically
+    5. Whitespace collapsed to single spaces, then stripped
+
+    Accented letters are PRESERVED (they are word characters).
+    Digits are preserved as digits -- note that "1975" will NOT match the
+    spoken "nineteen seventy five". Known limitation.
+
+EXAMPLES (verified)
+    "Don't -- you DARE!"   -> "dont you dare"
+    "well-known  facts"    -> "well known facts"
+    curly quotes           -> folded to plain text
+    "!!!"                  -> ""  (rejected as unmatchable)
+
+
+================================================================================
+10. EXIT CODES AND STATUS VALUES
+================================================================================
+
+CLI EXIT CODES (app/cli.py)
+    0   a match was found
+    1   no match above threshold (near misses printed if any)
+    2   an error -- bad input, unsupported media, or a processing failure
+    Distinct so a shell can tell "not in this video" from "something broke".
+
+RESULT STATUS (app/service.py, DialogueResult.status)
+    "found" | "not_found"        errors are raised, never a status value
+
+REFUSED MEDIA (all raise UnsupportedMediaError at resolve time)
+    playlists, live streams, upcoming premieres, still-processing VODs,
+    DRM-protected content, missing/non-numeric/non-positive duration,
+    duration over the cap, no plain-HTTP video format available
+
+
+================================================================================
+END -- keep this file updated when tuning any value above.
+================================================================================

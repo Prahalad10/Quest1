@@ -192,12 +192,52 @@ def _parse_url_expiry(url: str) -> Optional[int]:
     return None
 
 
+def _reject_playlist_url(url: str) -> None:
+    """Refuse a URL that addresses a PLAYLIST rather than a single video.
+
+    WHY THIS IS NEEDED SEPARATELY FROM THE PLAYLIST CHECK IN _reject_unsupported:
+    we pass noplaylist=True to yt-dlp, which makes it silently REINTERPRET a
+    playlist URL as that playlist's first video. So the _type == "playlist"
+    branch downstream almost never fires -- yt-dlp has already replaced the
+    request with a different one. The user asked about a playlist and would get
+    an answer about some video they never named, which is exactly the kind of
+    silent fallback this project refuses to make.
+
+    Deliberately narrow, so the common case keeps working:
+        REJECTED  youtube.com/playlist?list=PL...     addresses a playlist
+        ALLOWED   youtube.com/watch?v=X&list=PL...    addresses video X, which
+                                                      happens to sit in a list
+
+    USED BY: _validate_url, so both the CLI and the API refuse it identically.
+    """
+    parsed = urllib.parse.urlparse(url.strip())
+    path = parsed.path.lower().rstrip("/")
+    query = urllib.parse.parse_qs(parsed.query)
+
+    addresses_playlist = path.endswith("/playlist") or path == "/playlist"
+    # A bare list= with no video id and no /watch path is also a playlist
+    # reference on every host that uses this convention.
+    list_without_video = (
+        "list" in query and "v" not in query and not path.endswith("/watch")
+    )
+
+    if addresses_playlist or list_without_video:
+        raise InvalidInputError(
+            f"{url} addresses a playlist, not a single video. Pass the URL of one "
+            f"video instead -- e.g. the watch?v=... link for the specific video you "
+            f"mean. (A watch?v=...&list=... URL is fine: it names a single video.)"
+        )
+
+
 def _validate_url(url: str) -> None:
     """Reject anything that is not a plausible http(s) URL, before any network use.
 
     WHY UP FRONT: yt-dlp given a bare string will try a series of extractors and
     eventually fail with a message about unsupported URLs, which tells the user
     nothing useful. Catching it here produces one clear sentence instead.
+
+    Also rejects playlist URLs -- see _reject_playlist_url for why that cannot be
+    left to the downstream check.
 
     USED BY: resolve() and resolve_cached().
     """
@@ -210,6 +250,7 @@ def _validate_url(url: str) -> None:
         )
     if not parsed.netloc:
         raise InvalidInputError(f"Video URL has no host: {url!r}")
+    _reject_playlist_url(url)
 
 
 def _is_audio_only(fmt: dict[str, Any]) -> bool:

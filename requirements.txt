@@ -5,3 +5,8 @@
 yt-dlp>=2024.8.6          # resolve metadata + audio-only stream URL
 faster-whisper>=1.0.3     # ASR with word_timestamps + VAD (pulls ctranslate2, av, tokenizers)
 rapidfuzz>=3.9.0          # fuzzy substring matching
+
+# --- Web layer (Step 8+) ---
+fastapi>=0.115.0          # API framework: routing, validation, SSE-friendly
+uvicorn[standard]>=0.30.0 # ASGI server used to run it locally
+python-multipart>=0.0.9   # form-encoded request bodies
