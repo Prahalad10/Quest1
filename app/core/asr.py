@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -23,6 +24,120 @@ from app.errors import InvalidInputError, Quest1Error
 from app.progress import ProgressCallback, report
 
 STAGE = "asr"
+
+
+def format_clock(seconds: float) -> str:
+    """Format a number of seconds as M:SS, or H:MM:SS past an hour.
+
+    WHY: progress messages read far better as "3:42 / 8:50" than as
+    "222.4s / 530.1s", especially on a long video.
+
+    USED BY: the ASR progress messages below.
+    """
+    seconds = max(0.0, float(seconds))
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+class _Heartbeat:
+    """Emits interpolated ASR progress between real segment events.
+
+    WHY THIS EXISTS
+        faster-whisper's generator only yields once a segment has finished
+        decoding. On a long video consecutive segments can be 30-40 seconds
+        apart, so a progress bar driven purely by segment arrivals sits
+        completely frozen in between and looks broken -- which is exactly what
+        a 10-minute video showed: the bar parked at ~80% for minutes.
+
+        This background thread fills those gaps. Between segments it estimates
+        the current decode position from the observed rate so far, and reports
+        that instead. The estimate is always clamped BELOW the next real
+        position, so it can lead slightly but never overshoot into a lie.
+
+    HONESTY RULE
+        Before the first segment arrives there is no rate to extrapolate from,
+        so it reports percent=None (indeterminate) with the elapsed time in the
+        message. An indeterminate bar plus a ticking clock reads as "working";
+        a fabricated percentage would read as "stuck" the moment it stalled.
+
+    USED BY: transcribe().
+    """
+
+    def __init__(
+        self,
+        total: float,
+        callback: Optional[ProgressCallback],
+        interval: float,
+    ) -> None:
+        """Prepare (but do not start) the heartbeat for a `total`-second audio."""
+        self._total = total
+        self._callback = callback
+        self._interval = max(0.5, interval)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._started_at = time.time()
+        # Anchor: the last position a real segment confirmed, and when.
+        self._position = 0.0
+        self._position_at = self._started_at
+        self._words = 0
+        self._seen_segment = False
+
+    def start(self) -> None:
+        """Begin emitting. Daemon so it can never hold up interpreter exit."""
+        self._thread = threading.Thread(
+            target=self._run, name="quest1-asr-heartbeat", daemon=True
+        )
+        self._thread.start()
+
+    def update(self, position: float, words: int) -> None:
+        """Record a real segment boundary. CALLED FROM: the transcription loop."""
+        with self._lock:
+            self._position = float(position)
+            self._position_at = time.time()
+            self._words = words
+            self._seen_segment = True
+
+    def stop(self) -> None:
+        """Stop emitting and wait briefly for the thread to notice."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + 1.0)
+
+    def _estimate(self) -> tuple[Optional[float], str]:
+        """Return (percent, message) for right now."""
+        with self._lock:
+            position, position_at = self._position, self._position_at
+            words, seen = self._words, self._seen_segment
+        now = time.time()
+        elapsed = now - self._started_at
+
+        if not seen or not self._total:
+            # No rate yet: indeterminate, but visibly alive.
+            return None, f"transcribing… {format_clock(elapsed)} elapsed"
+
+        # Audio-seconds decoded per wall-second, measured over the whole run.
+        rate = position / elapsed if elapsed > 0 else 0.0
+        projected = position + (now - position_at) * rate if rate > 0 else position
+        # Never claim to be further along than the audio actually is.
+        projected = min(projected, self._total)
+
+        percent = min(100.0, projected / self._total * 100)
+        remaining = (self._total - projected) / rate if rate > 0 else 0.0
+        eta = f", ~{format_clock(remaining)} left" if remaining > 2 else ""
+        return percent, (
+            f"{format_clock(projected)} / {format_clock(self._total)} transcribed, "
+            f"{words} words{eta}"
+        )
+
+    def _run(self) -> None:
+        """Thread body: emit an estimate every `interval` until stopped."""
+        while not self._stop.wait(self._interval):
+            percent, message = self._estimate()
+            report(self._callback, STAGE, message, percent=percent)
 
 
 class AsrError(Quest1Error):
@@ -192,7 +307,10 @@ def transcribe(
     total = float(getattr(info, "duration", 0.0) or 0.0)
     segments: list[Segment] = []
     words: list[Word] = []
-    last_reported = 0.0
+
+    # Keeps the progress bar moving between segment arrivals; see _Heartbeat.
+    heartbeat = _Heartbeat(total, progress_callback, config.ASR_PROGRESS_INTERVAL_SECONDS)
+    heartbeat.start()
 
     # faster-whisper decodes lazily: the real work happens as this is consumed.
     try:
@@ -217,16 +335,14 @@ def transcribe(
                     end=float(word.end),
                     probability=float(getattr(word, "probability", 0.0) or 0.0),
                 ))
-            if total and segment.end - last_reported >= max(5.0, total / 20):
-                last_reported = float(segment.end)
-                percent = min(100.0, segment.end / total * 100)
-                report(
-                    progress_callback, STAGE,
-                    f"{segment.end:.1f}s / {total:.1f}s, {len(words)} words so far",
-                    percent=percent,
-                )
+            # Anchor the heartbeat to a position we actually reached.
+            heartbeat.update(float(segment.end), len(words))
     except Exception as exc:  # noqa: BLE001
         raise AsrError(f"Transcription failed mid-stream: {type(exc).__name__}: {exc}") from exc
+    finally:
+        # Must stop in every path, or the thread keeps reporting after the stage
+        # has moved on and the bar jumps backwards.
+        heartbeat.stop()
 
     elapsed = time.time() - started
     if not words:

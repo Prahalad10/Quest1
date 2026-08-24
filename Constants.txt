@@ -19,8 +19,8 @@ Values shown are the DEFAULTS as of Step 8. To see what is actually in effect:
 
 MAX_VIDEO_DURATION_SECONDS = 3600          env: QUEST1_MAX_DURATION
     Videos longer than this are refused outright.
-    WHY 1 hour: ASR cost is linear in duration and runs at ~0.7x realtime on
-    CPU, so a 1-hour video already costs ~43 minutes to index the first time.
+    WHY 1 hour: ASR cost is linear in duration. At the measured 0.39 wall-sec
+    per audio-sec, a 1-hour video costs ~23 minutes to index the first time.
     RAISE IT if you are indexing long content and can wait; the refusal is a
     guard against accidental multi-hour jobs, not a technical limit.
     ENFORCED IN: app/core/resolve.py, _reject_unsupported()
@@ -49,12 +49,26 @@ All scores are rapidfuzz partial_ratio values on a 0-100 scale.
 MATCH_THRESHOLD = 70.0                     env: QUEST1_MATCH_THRESHOLD
     Minimum score for a span to count as an occurrence at all.
     BELOW 70 the result is reported as no_match.
-    OBSERVED: an exact phrase scores 100. A phrase with one word dropped and
-    different punctuation scored 82.9. Unrelated text scored 45-55.
-    LOWER IT (e.g. 60) if real matches are being missed because the ASR
-    transcription differs a lot from the typed text.
+
+    *** VALIDATED AGAINST MEASUREMENT -- DO NOT LOWER WITHOUT RE-TESTING. ***
+    A 4-video study (scripts/test_series.py) measured the two distributions
+    this threshold has to separate:
+
+        TRUE  matches  n=83   min=71.4   p10=82.8   median=100.0
+        FALSE matches  n=184  median=53.7  p90=59.4  p99=65.7  max=68.0
+
+    The false sample is the important one: it uses natural phrases lifted from
+    OTHER videos, not gibberish. Gibberish tops out around 59 and makes the
+    threshold look far safer than it is; real language reaches 68.0.
+
+        false matches at or above 70: 0 / 184  (0.0%)   <-- current setting
+        false matches at or above 65: 3 / 184  (1.6%)
+        false matches at or above 60: 17 / 184 (9.2%)
+
+    Lowering to 65 was considered and REJECTED: it admits false positives, and
+    the single true match that was missed in testing scored 62.5, so 65 would
+    not have recovered it anyway. 70 sits in the only clean gap available.
     RAISE IT (e.g. 80) if unrelated lines are being returned as matches.
-    RISK OF LOWERING: near-miss noise starts being presented as real answers.
     ENFORCED IN: app/core/matching.py, find_matches() -> _search()
 
 CONFIDENT_THRESHOLD = 88.0                 env: QUEST1_CONFIDENT_THRESHOLD
@@ -63,6 +77,11 @@ CONFIDENT_THRESHOLD = 88.0                 env: QUEST1_CONFIDENT_THRESHOLD
     WHY 88: leaves room for minor ASR differences (a dropped article, a
     contraction) to still read as confident, while a materially different
     phrasing drops to ambiguous.
+
+    VALIDATED: in the 4-video study every result scoring >= 88 landed on the
+    CORRECT timestamp (error 0.00s). Both mislocated results scored below it
+    (76.7 and 82.1) and were correctly banded "ambiguous". The band did its job
+    -- it flagged exactly the cases that were wrong.
     ENFORCED IN: app/core/matching.py, classify()
 
 AMBIGUITY_MARGIN = 5.0                     env: QUEST1_AMBIGUITY_MARGIN
@@ -85,8 +104,15 @@ NEAR_MISS_COUNT = 3                        env: QUEST1_NEAR_MISS_COUNT
     When nothing clears MATCH_THRESHOLD, show up to NEAR_MISS_COUNT closest
     spans scoring at least NEAR_MISS_THRESHOLD.
     WHY A FLOOR AT ALL: without it, every no-match would show three random
-    fragments, presenting noise as a hint. 45 is above the score unrelated
-    text tends to reach on short transcripts.
+    fragments, presenting noise as a hint.
+
+    RAISING THIS TO 55 WAS CONSIDERED AND REJECTED. The median false-match
+    score is 53.7, so 55 would look more "selective" -- but on a short video
+    (the 19s test clip) every near miss scores 48-55, so the floor would
+    suppress them entirely and the user would get nothing to work with. Near
+    misses are labelled "closest lines in the transcript", never presented as
+    answers, so a low floor costs little and helps most on exactly the videos
+    where hints matter.
     PURPOSE: lets the user tell "I mistyped the quote" from "the ASR misheard
     it" from "that line is not in this video".
     ENFORCED IN: app/core/matching.py, find_matches()
@@ -103,9 +129,17 @@ CONFIDENCE BAND NAMES (do not change without updating the frontend)
 
 ASR_MODEL = "small"                        env: QUEST1_ASR_MODEL
     faster-whisper model name.
-    OBSERVED on this machine (CPU, int8): 19s of audio took 8.8-12.8s, i.e.
-    roughly 0.7x realtime. A 10-minute video therefore costs ~7 minutes to
-    index the FIRST time only; every later query on it is sub-second.
+    MEASURED on this machine (CPU, int8) across 3 multi-minute videos:
+
+        298s audio -> 121.0s ASR    0.41 wall-sec per audio-sec
+        465s audio -> 164.3s ASR    0.35
+        529s audio -> 221.0s ASR    0.42
+        AGGREGATE: 1292s audio -> 506s ASR = 0.39 wall-sec per audio-sec
+
+    So a 10-minute video costs about 3.9 MINUTES to index the first time only;
+    every later query on it is sub-second. (An earlier figure of "0.7x" came
+    from the 19s clip, where one-off model loading dominated the measurement --
+    short clips overstate the per-second cost.)
     OPTIONS, fastest to most accurate:
         tiny    ~75MB   fastest, noticeably worse on accents and fast speech
         base    ~145MB  good speed/accuracy compromise
@@ -278,6 +312,44 @@ FORMAT SELECTION RULES (app/core/resolve.py)
 8. OBSERVED PERFORMANCE (measured, not estimated)
 ================================================================================
 
+--- MULTI-VIDEO STUDY (scripts/test_series.py) --------------------------------
+Four videos, dialogue sampled at 2% / 25% / 50% / 75% / 97% of each timeline.
+
+  video                        dur    words   ASR wall   rate   fps      VFR
+  first YouTube video           19s      36      ~9s     0.47   15.000   no
+  TED-Ed narration             298s     657    121.0s    0.41   23.976   no
+  NASA mission briefing        465s    1001    164.3s    0.35   30.000   no
+  narrated short film          529s    1155    221.0s    0.42   23.976   no
+  (rate = wall-seconds per audio-second)
+
+  TIMESTAMP ACCURACY, exact quotes:  20/20 correct, error 0.00s, max 0.00s
+      Holds at every sampled position including 2% and 97%, on 15/24/30 fps
+      sources. The char-offset mapping does not drift at either extreme.
+
+  SCORE BY QUERY TYPE (n = number of queries):
+      exact          n=20   all 100.0
+      caps+punct     n=20   all 100.0    <- normalization fully absorbs these
+      first-half     n=20   all 100.0
+      contracted     n=4    min 93.1
+      drop-middle    n=19   min 71.4, median 85.7   <- harshest synthetic case
+
+  FALSE POSITIVES: 0 of 13 absent phrases matched. Widened to 184 natural
+  cross-video phrases, the highest false score was 68.0, still under the
+  70 threshold.
+
+  KNOWN LIMITATION FOUND BY THIS STUDY: one degraded query (a 7-word phrase
+  with a middle word removed) matched the WRONG occurrence, 178s away from the
+  true one, scoring 76.7 across 4 candidate locations. It was correctly banded
+  "ambiguous" and all 4 occurrences were returned, so the UI showed the user
+  the alternatives rather than asserting one. No threshold fixes this -- it is
+  the cost of fuzzy matching on a partial quote, and the ambiguous band plus
+  the occurrence list is the honest handling.
+
+  NO VFR SOURCE was encountered (all four were constant frame rate), so the
+  VFR null-frame path remains verified only by unit test, not against a real
+  variable-frame-rate video.
+
+--- SINGLE-VIDEO DETAIL -------------------------------------------------------
 Test video: youtube jNQXAC9IVRw "Me at the zoo", 19s, 240p, 15fps CFR
 
     resolve (cold)              ~2.5s
@@ -300,9 +372,30 @@ Long-video ranged seek check: youtube YE7VzlLtp-4, 10 min, 1080p, 24fps
     ^ proves no video download: the full 1080p stream is far larger.
 
 STAGE WEIGHTS for the progress bar (app/service.py, STAGE_WEIGHTS)
-    resolve 5 | audio 20 | probe 5 | asr 50 | index 5 | match 5 | frame 10
-    Rough relative cost on a COLD run. ASR dominates by design. These only
-    need to be approximately right for the bar to move smoothly.
+    resolve 3 | audio 5 | probe 2 | asr 85 | index 2 | match 1 | frame 2
+    giving these bands:  resolve 0-3, audio 3-8, probe 8-10, asr 10-95,
+                         index 95-97, match 97-98, frame 98-100
+
+    RECALIBRATED FROM MEASUREMENT. For the 530s video ASR was 221s of a ~232s
+    cold pipeline -- about 95% of total wall time. The original weights gave
+    ASR only 50 of 100, so the bar spent HALF its range on 95% of the work:
+    it crawled through the 30-80 band for minutes and then jumped to 100.
+    That is what "stuck at 80%" actually was.
+
+ASR_PROGRESS_INTERVAL_SECONDS = 2.0        env: QUEST1_ASR_PROGRESS_INTERVAL
+    How often the ASR heartbeat emits an interpolated position estimate.
+    WHY A HEARTBEAT IS NEEDED: faster-whisper only yields a segment once it has
+    finished decoding it, which on a long video is 30-40s apart. A bar driven
+    only by segment arrivals freezes in between. The heartbeat thread fills the
+    gaps by extrapolating from the observed decode rate, and clamps the estimate
+    so it can never claim to be further along than the audio actually is.
+    Before the first segment there is no rate to extrapolate from, so it reports
+    an INDETERMINATE percent with a ticking elapsed clock rather than a made-up
+    number.
+    MEASURED EFFECT (gap between progress updates during ASR):
+        before: one update per duration/20  (30s of audio on a 10-min video)
+        after:  2.0s median, 7.0s worst case -- the worst case is model loading,
+                which finishes before the heartbeat can start.
 
 
 ================================================================================

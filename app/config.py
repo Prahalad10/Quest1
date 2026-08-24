@@ -147,3 +147,10 @@ SSE_POLL_INTERVAL_SECONDS = float(os.environ.get("QUEST1_SSE_POLL_INTERVAL", "0.
 # SSE comment sent when nothing has happened, so proxies do not close an idle
 # connection during a long ASR stage.
 SSE_KEEPALIVE_SECONDS = _env_int("QUEST1_SSE_KEEPALIVE", 15)
+
+# --- ASR progress reporting --------------------------------------------------
+# faster-whisper only yields a segment when it has finished decoding it, which on
+# a long video can be 30-40s apart. Without a heartbeat between those events the
+# progress bar sits frozen and looks broken. This is how often the heartbeat
+# thread emits an interpolated estimate.
+ASR_PROGRESS_INTERVAL_SECONDS = float(os.environ.get("QUEST1_ASR_PROGRESS_INTERVAL", "2"))

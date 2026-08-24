@@ -28,6 +28,7 @@ USED BY
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -43,18 +44,25 @@ from app.progress import ProgressCallback, report, stderr_progress
 STAGE = "pipeline"
 
 # Relative cost of each stage on a COLD run, used to turn per-stage progress
-# into a single overall percentage for a progress bar. ASR dominates by design:
-# on CPU it runs at roughly 0.7x realtime while everything else is seconds.
-# These are weights, not measurements -- they only need to be roughly right for
-# the bar to move smoothly rather than lurch.
+# into a single overall percentage for a progress bar.
+#
+# CALIBRATED FROM MEASUREMENT, not guessed. Across three multi-minute videos
+# (298s / 465s / 530s) ASR ran at 0.39 wall-seconds per audio-second and
+# accounted for ~95% of total cold-run wall time -- for the 530s film, 221s of
+# a ~232s pipeline. Everything else is seconds.
+#
+# The original weights gave ASR only 50 of 100, so the bar spent HALF its range
+# on 95% of the work: it crawled through the 30-80 band for minutes and then
+# leapt to 100. Weighting ASR at 85 makes the bar's position track elapsed time
+# roughly linearly, which is the only thing that makes a progress bar honest.
 STAGE_WEIGHTS: dict[str, float] = {
-    "resolve": 5.0,
-    "audio": 20.0,
-    "probe": 5.0,
-    "asr": 50.0,      # emitted by app/core/asr.py during transcription
-    "index": 5.0,     # index assembly after ASR finishes
-    "match": 5.0,
-    "frame": 10.0,
+    "resolve": 3.0,
+    "audio": 5.0,
+    "probe": 2.0,
+    "asr": 85.0,      # emitted by app/core/asr.py during transcription
+    "index": 2.0,     # index assembly after ASR finishes
+    "match": 1.0,
+    "frame": 2.0,
 }
 
 # Order matters: the base offset of a stage is the sum of every earlier weight.
@@ -98,6 +106,9 @@ class _OverallProgress:
         # progress.null_progress explicitly to silence output instead.
         self._inner: ProgressCallback = inner if inner is not None else stderr_progress
         self._highest = 0.0
+        # The ASR heartbeat reports from its own thread while the pipeline
+        # thread reports stage transitions, so this is genuinely concurrent.
+        self._lock = threading.Lock()
         # Stage labels seen so far, in arrival order -- reported to the UI so it
         # can show which stages have already run.
         self.seen: list[str] = []
@@ -109,8 +120,9 @@ class _OverallProgress:
         ProgressCallback is expected -- the core modules never know it is not a
         plain function.
         """
-        if stage not in self.seen:
-            self.seen.append(stage)
+        with self._lock:
+            if stage not in self.seen:
+                self.seen.append(stage)
 
         # percent=None means "this stage cannot measure itself", NOT "finished".
         # Treating it as 100 would pin the bar to the END of the stage on the
@@ -120,8 +132,10 @@ class _OverallProgress:
         overall = _stage_base(stage) + STAGE_WEIGHTS.get(stage, 0.0) * within / 100.0
 
         # Never go backwards: a bar that retreats reads as a bug to a user.
-        self._highest = max(self._highest, min(overall, 99.0))
-        self._inner(stage, round(self._highest, 1), message)
+        with self._lock:
+            self._highest = max(self._highest, min(overall, 99.0))
+            current = self._highest
+        self._inner(stage, round(current, 1), message)
 
     def complete(self, message: str = "done") -> None:
         """Emit a final 100% event.
@@ -129,7 +143,8 @@ class _OverallProgress:
         USED BY: `find_dialogue` once the result is fully assembled, so the web
         UI can close its progress bar cleanly rather than leaving it at 99%.
         """
-        self._highest = 100.0
+        with self._lock:
+            self._highest = 100.0
         self._inner("done", 100.0, message)
 
 
