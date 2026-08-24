@@ -12,6 +12,14 @@ from pathlib import Path
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read an integer setting from the environment, failing loudly if malformed.
+
+    WHY NOT int(os.environ.get(name, default)): a typo like QUEST1_MAX_DURATION=1h
+    would raise a bare ValueError naming neither the variable nor its value. This
+    reports both, so a misconfigured deployment is diagnosable from one line.
+
+    USED BY: every integer setting defined in this module.
+    """
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
@@ -103,3 +111,22 @@ MIN_QUERY_CHARS = _env_int("QUEST1_MIN_QUERY_CHARS", 3)
 BAND_CONFIDENT = "confident"
 BAND_AMBIGUOUS = "ambiguous"
 BAND_NO_MATCH = "no_match"
+
+# --- Frame extraction --------------------------------------------------------
+# Coarse -ss lands this far BEFORE the target so the decoder has a keyframe to
+# start from; the remainder is consumed by a fine -ss after -i. Too small and
+# the seek may miss the preceding keyframe; too large and it decodes needlessly.
+FRAME_PREROLL_SECONDS = float(os.environ.get("QUEST1_FRAME_PREROLL", "5"))
+
+# A signed CDN URL within this many seconds of expiry is re-resolved before use
+# rather than being allowed to fail first.
+FRAME_URL_EXPIRY_MARGIN_SECONDS = _env_int("QUEST1_FRAME_EXPIRY_MARGIN", 60)
+
+# Single-frame extraction over HTTP should be quick; if it is not, something is
+# wrong and failing beats hanging.
+FRAME_TIMEOUT_SECONDS = _env_int("QUEST1_FRAME_TIMEOUT", 180)
+
+# --- Resolve cache -----------------------------------------------------------
+# Only used when a stream URL declares no expiry of its own; otherwise the URL's
+# own expire= timestamp governs. Keeps a repeat query from re-running yt-dlp.
+RESOLVE_CACHE_TTL_SECONDS = _env_int("QUEST1_RESOLVE_CACHE_TTL", 3600)

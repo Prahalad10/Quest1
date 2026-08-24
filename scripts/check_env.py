@@ -39,15 +39,27 @@ FFMPEG_INSTALL_COMMANDS = {
 
 
 class Check:
-    """One row of the results table."""
+    """One row of the results table: a name, a pass/fail, and an explanation.
+
+    USED BY: every check_* function below, and render_table.
+    """
 
     def __init__(self, name: str, ok: bool, detail: str) -> None:
+        """Store one check outcome. `detail` is shown verbatim in the table."""
         self.name = name
         self.ok = ok
         self.detail = detail
 
 
 def check_python() -> Check:
+    """Verify the interpreter is new enough, and report WHICH interpreter it is.
+
+    Printing sys.executable matters more than the version: the most common
+    setup mistake is running the system Python while believing the venv is
+    active, and the path makes that instantly visible.
+
+    USED BY: main().
+    """
     v = sys.version_info
     actual = f"{v.major}.{v.minor}.{v.micro}"
     ok = (v.major, v.minor) >= MIN_PYTHON
@@ -57,13 +69,28 @@ def check_python() -> Check:
 
 
 def check_venv() -> Check:
-    """Not fatal on its own, but a global install is almost always a mistake."""
+    """Warn when running outside a virtualenv.
+
+    Not a correctness problem on its own, but installing this project's
+    dependencies globally is almost always a mistake, and faster-whisper pulls
+    in several large packages.
+
+    USED BY: main().
+    """
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
     detail = sys.prefix if in_venv else "NOT in a venv -- packages would install globally"
     return Check("virtualenv active", in_venv, detail)
 
 
 def check_binary(name: str) -> Check:
+    """Verify an external binary exists AND actually runs.
+
+    WHY NOT JUST shutil.which: a file can be on PATH and still fail to execute --
+    a broken symlink, a wrong architecture, or a Windows execution alias that
+    resolves but errors. Running `-version` proves it works.
+
+    USED BY: main(), for ffmpeg and ffprobe.
+    """
     path = shutil.which(name)
     if path is None:
         return Check(name, False, "not found on PATH")
@@ -84,6 +111,14 @@ def check_binary(name: str) -> Check:
 
 
 def check_import(module_name: str, pip_name: str) -> Check:
+    """Verify a dependency imports, reporting its version.
+
+    Catches ImportError (not installed) separately from other exceptions (a
+    broken or half-installed package), because those need different fixes and a
+    broken install must never be reported as merely missing.
+
+    USED BY: main(), once per entry in REQUIRED_IMPORTS.
+    """
     try:
         mod = importlib.import_module(module_name)
     except ImportError as exc:
@@ -102,6 +137,10 @@ def check_import(module_name: str, pip_name: str) -> Check:
 
 
 def render_table(checks: list[Check]) -> None:
+    """Print all checks as an aligned PASS/FAIL table.
+
+    USED BY: main().
+    """
     name_w = max(len(c.name) for c in checks)
     print()
     print(f"{'CHECK'.ljust(name_w)}  {'RESULT':6}  DETAIL")
@@ -112,6 +151,14 @@ def render_table(checks: list[Check]) -> None:
 
 
 def print_hints(checks: list[Check]) -> None:
+    """Print how to fix whatever failed, plus the ffmpeg command for this OS.
+
+    The ffmpeg command is PRINTED, NEVER RUN. Installing a system package is a
+    change to the user machine and is theirs to approve -- this script only ever
+    reports.
+
+    USED BY: main().
+    """
     failed = {c.name for c in checks if not c.ok}
     system = platform.system()
 
@@ -134,6 +181,12 @@ def print_hints(checks: list[Check]) -> None:
 
 
 def main() -> int:
+    """Run every check, print the table and hints, return a shell exit code.
+
+    Returns 1 if anything failed, so this can gate a setup script or CI step.
+
+    USED BY: `python scripts/check_env.py`.
+    """
     checks: list[Check] = [check_python(), check_venv()]
     checks += [check_binary(b) for b in REQUIRED_BINARIES]
     checks += [check_import(mod, pip) for mod, pip in REQUIRED_IMPORTS]

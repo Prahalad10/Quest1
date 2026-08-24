@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -30,7 +31,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from app import config
+from app import config, paths
 from app.errors import InvalidInputError, ResolveError, UnsupportedMediaError
 from app.progress import ProgressCallback, report
 
@@ -47,7 +48,17 @@ SEEKABLE_PROTOCOLS = {"http", "https"}
 
 @dataclass
 class StreamChoice:
-    """One selected format, flattened to the fields downstream steps need."""
+    """One selected format, flattened to the fields downstream steps need.
+
+    yt-dlp format dicts carry dozens of keys; this keeps only what audio.py and
+    frame.py actually use, so those modules never have to know yt-dlp schema.
+
+    `http_headers` matters more than it looks: the CDN rejects requests whose
+    User-Agent does not match the session the signed URL was issued for, so
+    these must be passed to every ffmpeg invocation touching the URL.
+
+    USED BY: ResolvedMedia (audio and video slots).
+    """
 
     format_id: str
     url: str
@@ -68,7 +79,18 @@ class StreamChoice:
 
 @dataclass
 class ResolvedMedia:
-    """Everything Steps 2-6 need to know about a video, with no video bytes read."""
+    """Everything later stages need about a video, with no video bytes read.
+
+    Produced by resolve(), cached to disk by save_cached_resolve(), and passed
+    down through audio.py, index.py and frame.py.
+
+    Note what is and is not stable: `media_key` and `source_url` are permanent,
+    while `audio.url` and `video.url` are signed and expire within hours. That
+    split is why the cache is keyed on the former and validated against the
+    latter.
+
+    USED BY: app/service.py and every core module below it.
+    """
 
     media_key: str
     source_url: str
@@ -85,10 +107,39 @@ class ResolvedMedia:
     resolved_at: float
 
     def to_dict(self) -> dict[str, Any]:
+        """Plain-dict form. USED BY: to_json and the __main__ JSON output."""
         return asdict(self)
 
     def to_json(self, indent: int = 2) -> str:
+        """JSON text. USED BY: save_cached_resolve and the __main__ block."""
         return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ResolvedMedia":
+        """Rebuild from the dict form, restoring the nested StreamChoice objects.
+
+        asdict() flattens the dataclasses to plain dicts, so a naive cls(**data)
+        would leave `audio` and `video` as dicts and every attribute access on
+        them would fail. This is the inverse that keeps the round-trip honest.
+
+        USED BY: load_cached_resolve and _cached_resolve_is_usable.
+        """
+        payload = dict(data)
+        payload["audio"] = StreamChoice(**data["audio"])
+        payload["video"] = StreamChoice(**data["video"])
+        return cls(**payload)
+
+    def stream_urls_expire_at(self) -> Optional[int]:
+        """Earliest expiry across the two signed URLs, if either declares one.
+
+        The EARLIEST is used because the cached entry is only as good as its
+        soonest-expiring member; reusing it past that point would produce a 403
+        on whichever stream expired first.
+
+        USED BY: _cached_resolve_is_usable.
+        """
+        stamps = [s for s in (self.audio.expires_at, self.video.expires_at) if s]
+        return min(stamps) if stamps else None
 
 
 # --------------------------------------------------------------------------- #
@@ -96,10 +147,18 @@ class ResolvedMedia:
 # --------------------------------------------------------------------------- #
 
 def compute_media_key(extractor: str, video_id: str) -> str:
-    """Stable, filesystem-safe cache key.
+    """Stable, filesystem-safe cache key for one video.
 
-    Human-readable prefix for debugging, plus a hash suffix so two ids that
-    sanitize to the same slug can never collide.
+    THE KEY DECISION IN THE CACHING DESIGN: derived from extractor + video id
+    ONLY -- never from the stream URL. Signed URLs rotate on every resolve, so a
+    URL-derived key would miss the cache every single time and re-run ASR on
+    every query.
+
+    Format: readable slug + hash suffix, e.g. "youtube-jnqxac9ivrw-103eea2ce1".
+    The slug aids debugging; the hash guarantees two ids that sanitize to the
+    same slug cannot collide.
+
+    USED BY: resolve(), and therefore every path under data/{media_key}/.
     """
     raw = f"{extractor}:{video_id}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
@@ -108,7 +167,17 @@ def compute_media_key(extractor: str, video_id: str) -> str:
 
 
 def _parse_url_expiry(url: str) -> Optional[int]:
-    """Signed CDN URLs carry an expiry; Step 5 uses it to decide when to re-resolve."""
+    """Extract the expiry timestamp from a signed CDN URL, if it has one.
+
+    YouTube URLs carry ?expire=<unix ts>. Knowing it lets the resolve cache and
+    frame.py refresh proactively instead of discovering the expiry through a
+    failed request.
+
+    Returns None for hosts that do not advertise expiry, in which case callers
+    fall back to a conservative TTL.
+
+    USED BY: _to_choice, for both the audio and video streams.
+    """
     try:
         params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
     except ValueError:
@@ -124,6 +193,14 @@ def _parse_url_expiry(url: str) -> Optional[int]:
 
 
 def _validate_url(url: str) -> None:
+    """Reject anything that is not a plausible http(s) URL, before any network use.
+
+    WHY UP FRONT: yt-dlp given a bare string will try a series of extractors and
+    eventually fail with a message about unsupported URLs, which tells the user
+    nothing useful. Catching it here produces one clear sentence instead.
+
+    USED BY: resolve() and resolve_cached().
+    """
     if not isinstance(url, str) or not url.strip():
         raise InvalidInputError("Video URL is required and must be a non-empty string.")
     parsed = urllib.parse.urlparse(url.strip())
@@ -136,22 +213,47 @@ def _validate_url(url: str) -> None:
 
 
 def _is_audio_only(fmt: dict[str, Any]) -> bool:
+    """True for a format with audio and no video -- what ASR wants.
+
+    USED BY: select_audio_format and the has_separate_audio_stream flag.
+    """
     return fmt.get("vcodec") in (None, "none") and fmt.get("acodec") not in (None, "none")
 
 
 def _is_video_only(fmt: dict[str, Any]) -> bool:
+    """True for a DASH video-only format -- preferred for frame extraction.
+
+    Preferred because a ranged read against it pulls no audio bytes at all.
+
+    USED BY: select_video_format.
+    """
     return fmt.get("vcodec") not in (None, "none") and fmt.get("acodec") in (None, "none")
 
 
 def _has_video(fmt: dict[str, Any]) -> bool:
+    """True for any format carrying a video stream, progressive or video-only.
+
+    USED BY: select_video_format and select_audio_format.
+    """
     return fmt.get("vcodec") not in (None, "none")
 
 
 def _usable(fmt: dict[str, Any]) -> bool:
+    """True when a format has a URL and is not individually DRM-protected.
+
+    USED BY: both format selectors, as a common pre-filter.
+    """
     return bool(fmt.get("url")) and not fmt.get("has_drm")
 
 
 def _to_choice(fmt: dict[str, Any]) -> StreamChoice:
+    """Convert a yt-dlp format dict into our own StreamChoice.
+
+    The boundary where yt-dlp's schema stops and ours begins: nothing downstream
+    of resolve() ever sees a raw yt-dlp dict.
+
+    USED BY: resolve(), for the two selected formats.
+    """
     url = fmt["url"]
     return StreamChoice(
         format_id=str(fmt.get("format_id", "?")),
@@ -177,7 +279,18 @@ def _to_choice(fmt: dict[str, Any]) -> StreamChoice:
 # --------------------------------------------------------------------------- #
 
 def _reject_unsupported(info: dict[str, Any], url: str, max_duration: int) -> None:
-    """Raise UnsupportedMediaError for anything this pipeline must not process."""
+    """Raise UnsupportedMediaError for anything this pipeline must not process.
+
+    ALL REFUSALS LIVE HERE so the rules are auditable in one place: playlists,
+    live streams, upcoming premieres, still-processing VODs, DRM, and videos
+    with a missing, non-numeric, non-positive or over-cap duration.
+
+    A missing duration is refused rather than tolerated because every later stage
+    validates against it -- the audio truncation check and the frame clamp both
+    become meaningless without it.
+
+    USED BY: resolve(), immediately after extraction and before any format work.
+    """
     if info.get("_type") == "playlist" or "entries" in info:
         count = len(info.get("entries") or [])
         raise UnsupportedMediaError(
@@ -227,8 +340,17 @@ def _reject_unsupported(info: dict[str, Any], url: str, max_duration: int) -> No
 def select_audio_format(formats: list[dict[str, Any]]) -> dict[str, Any]:
     """Best audio-only stream: highest bitrate wins.
 
-    Falls back to a progressive format only if the host offers no audio-only
-    stream at all -- that costs video bytes, so it is a last resort.
+    Bitrate is the right criterion because ASR accuracy tracks audio quality and
+    the file is transcoded to 16kHz mono immediately anyway, so container size
+    barely matters.
+
+    Falls back to a progressive format only if the host offers NO audio-only
+    stream -- and then picks the LOWEST bitrate one, since every byte of that
+    format is video we do not want. This is the one path that violates the
+    "never fetch video" goal, so it is a genuine last resort and ensure_audio
+    warns when it is taken.
+
+    USED BY: resolve().
     """
     candidates = [f for f in formats if _usable(f) and _is_audio_only(f)]
     if candidates:
@@ -249,8 +371,15 @@ def select_audio_format(formats: list[dict[str, Any]]) -> dict[str, Any]:
 def select_video_format(formats: list[dict[str, Any]], max_height: int) -> dict[str, Any]:
     """Best seekable video stream at or below `max_height`.
 
+    THE PROTOCOL FILTER IS LOAD-BEARING: HLS and DASH manifest formats are not
+    single seekable byte streams, so a ranged seek against one is impossible.
+    Rejecting them here means frame extraction fails at RESOLVE time with a clear
+    explanation, rather than deep inside ffmpeg after ASR has already run.
+
     Prefers video-only (DASH) over progressive so a ranged read pulls no audio
-    bytes, and requires a plain-HTTP protocol because Step 5 seeks by byte range.
+    bytes. The height cap keeps the read small: 4K buys nothing for a single PNG.
+
+    USED BY: resolve().
     """
     seekable = [
         f for f in formats
@@ -263,6 +392,11 @@ def select_video_format(formats: list[dict[str, Any]], max_height: int) -> dict[
         )
 
     def rank(f: dict[str, Any]) -> tuple:
+        """Sort key: prefer within the cap, then taller, then higher bitrate.
+
+        Formats above the cap sort by NEGATIVE height so that, if every option
+        exceeds it, the least oversized one wins rather than the largest.
+        """
         height = f.get("height") or 0
         # Within the cap, taller is better; above it, prefer the least-oversized.
         within_cap = height <= max_height
@@ -284,8 +418,16 @@ def probe_http_ranges(
 ) -> tuple[bool, str]:
     """Ask the host for the first two bytes and see whether it honours Range.
 
-    Returns (supported, human-readable detail). A failure here is reported, not
-    raised: it is diagnostic information for Step 5, not a reason to abort.
+    Verifies the assumption the whole project rests on. A 206 Partial Content
+    response proves the host will serve byte ranges, which is what makes single-
+    frame extraction possible without downloading the video.
+
+    Returns (supported, human-readable detail) and NEVER raises: this is
+    diagnostic information, and a probe that fails for an unrelated reason should
+    not block a resolve whose other output is perfectly good.
+
+    USED BY: resolve() when check_ranges is True. app/service.py passes False,
+    since by then the answer would not change what it does.
     """
     request = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-1"})
     try:
@@ -310,6 +452,110 @@ def probe_http_ranges(
 
 
 # --------------------------------------------------------------------------- #
+# Resolve cache
+# --------------------------------------------------------------------------- #
+
+def _cached_resolve_is_usable(payload: dict[str, Any]) -> bool:
+    """A cached resolve is only usable while its signed stream URLs still are.
+
+    Two-tier check: prefer the URL's own declared expiry, and fall back to a
+    conservative age limit for hosts that declare none. Getting this wrong in the
+    permissive direction means a 403 mid-pipeline; in the strict direction it
+    just costs an unnecessary re-resolve, so the fallback errs strict.
+
+    USED BY: load_cached_resolve.
+    """
+    try:
+        media = ResolvedMedia.from_dict(payload)
+    except (KeyError, TypeError):
+        return False
+
+    expires_at = media.stream_urls_expire_at()
+    now = time.time()
+    if expires_at:
+        return now < (expires_at - config.FRAME_URL_EXPIRY_MARGIN_SECONDS)
+    # No declared expiry: fall back to a conservative age limit.
+    return (now - media.resolved_at) < config.RESOLVE_CACHE_TTL_SECONDS
+
+
+def load_cached_resolve(url: str) -> Optional[ResolvedMedia]:
+    """Return a still-valid cached resolve for `url`, or None.
+
+    A corrupt or expired entry is simply IGNORED here, unlike the transcript
+    index which raises on corruption. The asymmetry is deliberate: re-resolving
+    costs a couple of seconds and can never produce a wrong answer, whereas
+    silently rebuilding a corrupt index would hide a real problem and cost
+    minutes of ASR.
+
+    USED BY: resolve_cached.
+    """
+    path = paths.resolve_cache_path(url)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not _cached_resolve_is_usable(payload):
+        return None
+    try:
+        return ResolvedMedia.from_dict(payload)
+    except (KeyError, TypeError):
+        return None
+
+
+def save_cached_resolve(media: ResolvedMedia) -> None:
+    """Persist a resolve result so the next query on this URL can skip yt-dlp.
+
+    Written atomically via a .part file, so a concurrent reader never sees a
+    half-written document.
+
+    USED BY: resolve_cached, after a successful fresh resolve.
+    """
+    paths.ensure_resolve_cache_dir()
+    path = paths.resolve_cache_path(media.source_url)
+    temp = path.with_suffix(".part")
+    temp.write_text(media.to_json(), encoding="utf-8")
+    os.replace(temp, path)
+
+
+def resolve_cached(
+    url: str,
+    *,
+    force: bool = False,
+    progress_callback: Optional[ProgressCallback] = None,
+    **kwargs: Any,
+) -> tuple[ResolvedMedia, bool]:
+    """resolve(), but reusing a cached result while its stream URLs are valid.
+
+    Returns (media, from_cache). This is what makes a repeat query on the same
+    video fast: a fresh yt-dlp extraction costs seconds and would otherwise
+    dominate the entire response time once ASR is cached.
+
+    A cache WRITE failure is reported and swallowed -- failing the whole request
+    because a cache could not be saved would be the wrong trade.
+
+    USED BY: app/service.py (stage 1). Prefer this over resolve() anywhere a
+    repeat call is plausible.
+    """
+    _validate_url(url)
+    url = url.strip()
+    if not force:
+        cached = load_cached_resolve(url)
+        if cached is not None:
+            report(progress_callback, STAGE, f"cache hit: media_key={cached.media_key}")
+            return cached, True
+
+    media = resolve(url, progress_callback=progress_callback, **kwargs)
+    try:
+        save_cached_resolve(media)
+    except OSError as exc:
+        # A cache write failure must not fail the request.
+        report(progress_callback, STAGE, f"WARNING: could not write resolve cache: {exc}")
+    return media, False
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
 
@@ -323,9 +569,17 @@ def resolve(
 ) -> ResolvedMedia:
     """Extract metadata and stream URLs for `url` without downloading media.
 
+    The ONLY function in the project that talks to yt-dlp. Everything downstream
+    consumes ResolvedMedia, so a yt-dlp API change touches this file alone.
+
+    Always performs a fresh network extraction -- call resolve_cached() unless
+    you specifically need current URLs.
+
     Raises InvalidInputError for a malformed URL, ResolveError if yt-dlp cannot
     extract the page, and UnsupportedMediaError for playlists, live streams,
     DRM, over-long videos, or an unseekable format set.
+
+    USED BY: resolve_cached, and frame.py when retrying after an expired URL.
     """
     _validate_url(url)
     url = url.strip()
@@ -413,6 +667,17 @@ def resolve(
 # --------------------------------------------------------------------------- #
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Standalone entry point: resolve a URL and print its metadata as JSON.
+
+    WHY: the fastest way to check whether a video is usable before spending time
+    on it. The three fields that matter are supports_http_ranges (frame
+    extraction viability), audio.vcodec == "none" (a true audio-only stream
+    exists), and video.protocol (must be https, not a manifest).
+
+    Progress goes to stderr and JSON to stdout, so the output pipes cleanly.
+
+    USED BY: `python -m app.core.resolve "<url>" [--no-urls]`.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m app.core.resolve",
         description="Resolve a video URL to metadata + stream URLs (no download).",

@@ -43,7 +43,15 @@ _MASK = "\x00"
 
 @dataclass
 class Occurrence:
-    """One place in the transcript where the target text appears."""
+    """One place in the transcript where the target text appears.
+
+    Carries both the machine view (score, char span, word indices) and the human
+    view (matched_text, context) because an ambiguous result has to be JUDGED by
+    a person, and a bare timestamp gives them nothing to judge with.
+
+    USED BY: MatchResult, app/service.py (turns the best one into a frame), and
+    the web UI (renders other occurrences and near misses).
+    """
 
     score: float
     char_start: int
@@ -57,12 +65,22 @@ class Occurrence:
     context: str           # surrounding words, so an ambiguous hit can be judged
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable form, used wherever this is persisted or returned."""
         return asdict(self)
 
 
 @dataclass
 class MatchResult:
-    """The full answer to one query, including why it might be uncertain."""
+    """The full answer to one query, including why it might be uncertain.
+
+    Deliberately returns EVERY occurrence above threshold, not just the winner.
+    A line said three times has three legitimate answers, and only the user can
+    say which one they meant -- silently picking one and hiding the rest would
+    make a guess look like a fact.
+
+    USED BY: app/service.py, which promotes `best` into the final answer and
+    passes the rest through as other_occurrences.
+    """
 
     media_key: str
     query: str
@@ -74,16 +92,30 @@ class MatchResult:
 
     @property
     def found(self) -> bool:
+        """True when at least one occurrence cleared the threshold.
+
+        USED BY: app/service.py to choose between the found and not_found paths.
+        """
         return bool(self.occurrences)
 
     @property
     def best(self) -> Optional[Occurrence]:
-        """Highest-scoring occurrence; ties broken by earliest in the video."""
+        """Highest-scoring occurrence; ties broken by EARLIEST in the video.
+
+        WHY EARLIEST WINS A TIE: with several identical matches something has to
+        decide, and "the first time it is said" is the least surprising rule.
+        The alternatives are all arbitrary, and the losing occurrences are
+        returned anyway so nothing is hidden.
+
+        USED BY: app/service.py (selects the timestamp to extract a frame from)
+        and the CLI (marks it in the printed list).
+        """
         if not self.occurrences:
             return None
         return max(self.occurrences, key=lambda o: (o.score, -o.start_time))
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON form. USED BY: `python -m app.core.matching --json`."""
         return {
             "media_key": self.media_key,
             "query": self.query,
@@ -98,6 +130,14 @@ class MatchResult:
 
 
 def _require_rapidfuzz():
+    """Import rapidfuzz lazily, with an actionable message if it is absent.
+
+    WHY LAZY: keeps module import cheap for callers that only need the dataclasses
+    or format_timestamp, and turns a missing dependency into an instruction
+    rather than an ImportError traceback.
+
+    USED BY: _search.
+    """
     try:
         from rapidfuzz import fuzz
     except ImportError as exc:  # pragma: no cover - environment problem
@@ -108,7 +148,17 @@ def _require_rapidfuzz():
 
 
 def _build_occurrence(index: TranscriptIndex, score: float, start: int, end: int) -> Optional[Occurrence]:
-    """Turn a character span into a fully resolved occurrence, or None if unusable."""
+    """Turn a character span into a fully resolved occurrence, or None if unusable.
+
+    Where character offsets become TIMESTAMPS: the span is mapped to a word range
+    via the index offset array, and the word range to a time range.
+
+    Returns None (rather than raising) for a span made entirely of separators,
+    which cannot name a word. _search skips those instead of reporting a match
+    with no timestamp.
+
+    USED BY: _search.
+    """
     try:
         first_word, last_word = index.span_to_word_range(start, end)
     except Quest1Error:
@@ -138,7 +188,20 @@ def _search(
     threshold: float,
     limit: int,
 ) -> list[Occurrence]:
-    """Mask-and-repeat search returning every span scoring >= threshold."""
+    """Mask-and-repeat search returning every span scoring >= threshold.
+
+    HOW IT FINDS ALL OCCURRENCES: rapidfuzz partial_ratio_alignment returns only
+    the single BEST alignment. To find the rest, the winning span is overwritten
+    with NUL bytes and the search repeated. NUL is used because it cannot appear
+    in normalized text and, crucially, preserves the length of the string -- so
+    every character offset still refers to the same place in the original.
+
+    The zero-width guard is defensive: a zero-length span would never be masked
+    and the loop would spin forever.
+
+    USED BY: find_matches, for both real matches and near misses (the only
+    difference is the threshold).
+    """
     fuzz = _require_rapidfuzz()
     haystack = index.normalized_text
     found: list[Occurrence] = []
@@ -166,9 +229,18 @@ def _search(
 def classify(occurrences: list[Occurrence], *, confident_threshold: float, margin: float) -> str:
     """Decide the confidence band for a set of occurrences.
 
-    A high score alone is not enough: if a second occurrence scores within
-    `margin` of the best, we genuinely cannot tell which one the caller meant,
-    so the answer is ambiguous even though the match itself is strong.
+    THE ARBITRATION RULE. A high score alone is not enough to be confident: if a
+    second occurrence scores within `margin` of the best, we genuinely cannot
+    tell which one the caller meant, so the answer is downgraded to ambiguous
+    even though the match itself is perfect.
+
+    This is what stops the system presenting a coin-flip as a fact. The three
+    bands come from config so they can be tuned without touching this logic.
+
+    Deliberately source-agnostic: it takes a list of occurrences and nothing
+    else, so a future visual/OCR path could reuse it unchanged.
+
+    USED BY: find_matches.
     """
     if not occurrences:
         return config.BAND_NO_MATCH
@@ -192,12 +264,23 @@ def find_matches(
     limit: Optional[int] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> MatchResult:
-    """Locate `query` within `index`.
+    """Locate `query` within `index`. THE QUERY ENTRY POINT.
 
-    Returns every occurrence at or above threshold sorted by time, plus a
-    confidence band. When nothing matches, `near_misses` holds the closest few
-    spans so the caller can show what the transcript actually says instead of
+    Cheap by design -- milliseconds against an already-built index -- which is
+    what makes a second search on the same video fast.
+
+    The query is normalized with the SAME function used at index time, so typed
+    punctuation, casing and curly quotes are irrelevant to whether it matches.
+
+    Returns every occurrence at or above threshold sorted by TIME (not score),
+    plus a confidence band. When nothing matches, `near_misses` holds the closest
+    few spans so the caller can show what the transcript actually says instead of
     fabricating an answer.
+
+    Raises InvalidInputError for empty text, text that normalizes to nothing, or
+    a query too short to produce a meaningful timestamp.
+
+    USED BY: app/service.py (stage 5) and find_in_media below.
     """
     if not isinstance(query, str) or not query.strip():
         raise InvalidInputError("Dialogue text is required and must be a non-empty string.")
@@ -264,7 +347,15 @@ def find_in_media(
     progress_callback: Optional[ProgressCallback] = None,
     **kwargs: Any,
 ) -> MatchResult:
-    """Convenience wrapper: load the cached index for `media_key`, then match."""
+    """Convenience wrapper: load the cached index for `media_key`, then match.
+
+    Deliberately does NOT build an index if one is missing -- ASR takes minutes
+    and should never be triggered as a side effect of a query. It says how to
+    build it instead.
+
+    USED BY: the __main__ block below. app/service.py calls find_matches directly
+    because it already holds the index.
+    """
     paths.validate_media_key(media_key)
     index = load_index(media_key)
     if index is None:
@@ -276,7 +367,14 @@ def find_in_media(
 
 
 def format_timestamp(seconds: float) -> str:
-    """HH:MM:SS.sss -- the output format the CLI must produce."""
+    """Format seconds as HH:MM:SS.sss -- the required output format.
+
+    Millisecond precision is kept because at 30fps a single frame is 33ms; a
+    coarser timestamp could not distinguish adjacent frames.
+
+    USED BY: app/service.py (the timestamp field), app/cli.py, and the web UI
+    via the JSON response.
+    """
     if seconds < 0:
         seconds = 0.0
     hours, remainder = divmod(float(seconds), 3600)
@@ -289,6 +387,10 @@ def format_timestamp(seconds: float) -> str:
 # --------------------------------------------------------------------------- #
 
 def _print_occurrence(label: str, occ: Occurrence) -> None:
+    """Print one occurrence as an indented block.
+
+    USED BY: main(), for matches and near misses alike so both read the same.
+    """
     print(f"  {label}")
     print(f"    score      : {occ.score}")
     print(f"    time       : {format_timestamp(occ.start_time)} -> "
@@ -299,6 +401,16 @@ def _print_occurrence(label: str, occ: Occurrence) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Standalone entry point: query an already-built index and print matches.
+
+    WHY: lets matching be tuned in isolation. Because it needs no network and no
+    model, --threshold can be swept in a fraction of a second to see how the
+    confidence bands behave on real transcript text.
+
+    Exit code 1 on no-match, so a shell can distinguish "absent" from "broken".
+
+    USED BY: `python -m app.core.matching <media_key> "<text>"`.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m app.core.matching",
         description="Find a line of dialogue in a cached transcript index.",

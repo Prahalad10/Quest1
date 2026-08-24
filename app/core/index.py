@@ -44,12 +44,27 @@ STAGE = "index"
 
 
 class TranscriptIndexError(Quest1Error):
-    """The transcript index is missing, corrupt, or stale."""
+    """The transcript index is missing, corrupt, or internally inconsistent.
+
+    Note the asymmetry in how this module reacts to problems: a STALE index
+    (INDEX_VERSION mismatch) is not an error -- load_index returns None and the
+    caller rebuilds. A CORRUPT index raises, because silently rebuilding over
+    corruption would hide a real problem such as a failing disk.
+    """
 
 
 @dataclass
 class TranscriptIndex:
-    """Everything querying needs, with no ASR dependency."""
+    """Everything querying needs, with no ASR dependency.
+
+    THE CENTRAL DATA STRUCTURE of the project. Built once per video (expensive),
+    then read by every subsequent query (cheap). Because it carries the flat
+    normalized text AND the char->word offset array, a query never needs the
+    model, the audio, or the network.
+
+    USED BY: matching.py (searches normalized_text, maps spans back through
+    char_to_word) and app/service.py (holds it between stages).
+    """
 
     media_key: str
     index_version: int
@@ -68,10 +83,19 @@ class TranscriptIndex:
 
     @property
     def word_count(self) -> int:
+        """Number of usable words. USED BY: progress messages and the manifest."""
         return len(self.words)
 
     def word_time_span(self, first: int, last: int) -> tuple[float, float]:
-        """Start of word `first` to end of word `last`, inclusive."""
+        """Start of word `first` to end of word `last`, inclusive.
+
+        Indices are clamped rather than raising, and a reversed range is swapped,
+        because callers derive them from fuzzy match spans where an off-by-one at
+        the very edge of the transcript is possible and harmless.
+
+        USED BY: matching._build_occurrence, to turn a word range into the
+        timestamps that ultimately select the frame.
+        """
         if not self.words:
             raise TranscriptIndexError("Index contains no words.")
         first = max(0, min(first, len(self.words) - 1))
@@ -83,8 +107,16 @@ class TranscriptIndex:
     def span_to_word_range(self, start: int, end: int) -> tuple[int, int]:
         """Map a [start, end) char span of normalized_text to a word index range.
 
-        Whitespace at either edge of the span is trimmed first, so a span that
-        happens to begin on a separator does not pull in the previous word.
+        THE BRIDGE between fuzzy matching (which works on characters) and
+        timestamps (which exist per word). rapidfuzz returns character offsets;
+        this converts them into the word indices whose times we need.
+
+        Whitespace at either edge is trimmed FIRST. Separators are recorded as
+        belonging to the word on their left, so a span that happens to begin on
+        a space would otherwise pull in the entire preceding word and report a
+        timestamp too early.
+
+        USED BY: matching._build_occurrence.
         """
         text = self.normalized_text
         if not text:
@@ -100,12 +132,26 @@ class TranscriptIndex:
         return self.char_to_word[start], self.char_to_word[end - 1]
 
     def context_text(self, first: int, last: int, padding: int = 6) -> str:
-        """Original (un-normalized) words around a match, for display."""
+        """Original (un-normalized) words around a match, for display.
+
+        WHY UN-NORMALIZED: the user should see what was actually said, with its
+        punctuation and casing, not the lowercase stripped form used internally.
+
+        WHY IT MATTERS: for an "ambiguous" result this is how a human decides
+        whether the match is the line they meant.
+
+        USED BY: matching._build_occurrence -> shown by the CLI and the web UI.
+        """
         low = max(0, first - padding)
         high = min(len(self.words), last + 1 + padding)
         return " ".join(w["word"] for w in self.words[low:high])
 
     def to_transcript_dict(self) -> dict[str, Any]:
+        """Serialise everything to the transcript.json schema.
+
+        USED BY: _persist. The matching field list in load_index must be kept in
+        step with this -- a change to either is a reason to bump INDEX_VERSION.
+        """
         return {
             "media_key": self.media_key,
             "index_version": self.index_version,
@@ -129,8 +175,22 @@ class TranscriptIndex:
 def build_flat_text(words: list[Word]) -> tuple[str, list[int], list[Word]]:
     """Join normalized words into one string plus its char -> word index map.
 
-    Words that normalize to nothing (pure punctuation) are dropped entirely, so
-    the returned word list -- not the input -- is what char_to_word indexes into.
+    THE CORE INDEXING STEP. Produces the two structures every query depends on:
+
+        flat          "alright so here we are one of the elephants ..."
+        char_to_word  [0,0,0,0,0,0,0, 0, 1,1, 1, 2,2,2,2, ...]
+
+    so that character i of the flat text can be traced back to the word that
+    produced it, and from there to its timestamp.
+
+    Words that normalize to nothing (pure punctuation) are DROPPED, which is why
+    the function returns its own `kept` list: char_to_word indexes into that, not
+    into the input. Returning the wrong one here would offset every timestamp.
+
+    The separator between two words is attributed to the word on its LEFT; see
+    TranscriptIndex.span_to_word_range for how that is handled at query time.
+
+    USED BY: build_index.
     """
     kept: list[Word] = []
     pieces: list[str] = []
@@ -166,7 +226,14 @@ def build_index(
     language: Optional[str] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> TranscriptIndex:
-    """Run ASR and write transcript.json + index.json. Always recomputes."""
+    """Run ASR and write transcript.json + index.json. Always recomputes.
+
+    Call ensure_index instead unless you specifically want to force a rebuild --
+    this function does no cache checking and will happily spend minutes
+    re-transcribing a video that is already indexed.
+
+    USED BY: ensure_index.
+    """
     paths.validate_media_key(media_key)
     result: Transcription = transcribe(
         wav_path,
@@ -201,12 +268,29 @@ def build_index(
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Write JSON via a .part file then rename.
+
+    WHY: load_index treats the presence of both files as proof of a usable
+    index. A partially written transcript.json would be detected only as a JSON
+    parse error much later, after the expensive ASR had already been discarded.
+
+    USED BY: _persist.
+    """
     temp = path.with_suffix(path.suffix + ".part")
     temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(temp, path)
 
 
 def _persist(index: TranscriptIndex, *, progress_callback: Optional[ProgressCallback] = None) -> None:
+    """Write transcript.json (the data) and index.json (the manifest).
+
+    WHY TWO FILES: staleness is checked on every query, and transcript.json can
+    be megabytes for a long video. Keeping INDEX_VERSION and the counts in a
+    small separate manifest means the check costs a few hundred bytes instead of
+    parsing the whole transcript.
+
+    USED BY: build_index.
+    """
     paths.ensure_media_dir(index.media_key)
     transcript_file = paths.transcript_path(index.media_key)
     index_file = paths.index_path(index.media_key)
@@ -246,9 +330,17 @@ def _persist(index: TranscriptIndex, *, progress_callback: Optional[ProgressCall
 def load_index(media_key: str) -> Optional[TranscriptIndex]:
     """Return the cached index, or None if it is absent or stale.
 
-    A stale index (INDEX_VERSION mismatch) is treated as absent so the caller
-    rebuilds. A corrupt index raises -- silently rebuilding over corruption
-    would hide a real problem.
+    A stale index (INDEX_VERSION mismatch) is treated as ABSENT so the caller
+    rebuilds -- that is the whole purpose of the version constant. A CORRUPT
+    index RAISES, because silently rebuilding over corruption would hide a real
+    problem and cost the user minutes of ASR without explanation.
+
+    The final consistency check (len(normalized_text) == len(char_to_word)) is
+    cheap insurance: if those ever disagreed, every mapped timestamp would be
+    quietly wrong rather than obviously broken.
+
+    USED BY: ensure_index, and matching.find_in_media for a query against an
+    already-indexed video.
     """
     paths.validate_media_key(media_key)
     index_file = paths.index_path(media_key)
@@ -307,7 +399,17 @@ def ensure_index(
     language: Optional[str] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> TranscriptIndex:
-    """Load the cached index, or build it. The cache gate for the whole system."""
+    """Load the cached index, or build it. THE cache gate for the whole system.
+
+    This one function is why a second search on the same video takes a second
+    instead of minutes: it is the only place ASR is triggered, and it triggers it
+    only when there is no valid index on disk.
+
+    Sets from_cache on the returned index so callers can report honestly which
+    stages were reused.
+
+    USED BY: app/service.py (stage 4).
+    """
     if not force:
         cached = load_index(media_key)
         if cached is not None:
@@ -333,6 +435,14 @@ def ensure_index(
 # --------------------------------------------------------------------------- #
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Standalone entry point: build or inspect a media_key transcript index.
+
+    WHY: lets you confirm what was transcribed and where each word sits in the
+    flat text, without running a query. The CHARS column shows each word span
+    in normalized_text, which is the mapping matching.py relies on.
+
+    USED BY: `python -m app.core.index <media_key> [--text] [--force]`.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m app.core.index",
         description="Build or inspect the transcript index for a media_key.",

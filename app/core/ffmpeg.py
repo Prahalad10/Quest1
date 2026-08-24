@@ -29,6 +29,14 @@ HTTP_RECONNECT_ARGS = [
 
 
 def _binary(name: str) -> str:
+    """Locate an ffmpeg-family binary on PATH, or explain how to install it.
+
+    WHY: a bare FileNotFoundError from subprocess names the binary but gives the
+    user no idea what to do about it. ffmpeg is a SYSTEM dependency that pip
+    cannot install, so the message has to say so explicitly.
+
+    USED BY: ffmpeg_binary() and ffprobe_binary().
+    """
     path = shutil.which(name)
     if path is None:
         raise FFmpegError(
@@ -39,18 +47,35 @@ def _binary(name: str) -> str:
 
 
 def ffmpeg_binary() -> str:
+    """Path to the ffmpeg executable.
+
+    USED BY: run_ffmpeg -- i.e. the audio transcode (audio.py) and the frame
+    extraction (frame.py).
+    """
     return _binary("ffmpeg")
 
 
 def ffprobe_binary() -> str:
+    """Path to the ffprobe executable.
+
+    USED BY: run_ffprobe_json -- i.e. the video probe and the wav validation in
+    audio.py.
+    """
     return _binary("ffprobe")
 
 
 def build_input_headers(http_headers: Optional[dict[str, str]]) -> list[str]:
     """Turn yt-dlp's per-format headers into ffmpeg input arguments.
 
-    User-Agent gets its own flag because some ffmpeg builds ignore it when it is
-    folded into the generic -headers blob.
+    WHY HEADERS MATTER: YouTube's CDN rejects requests whose User-Agent and
+    Referer do not match the session the signed URL was issued to. Without these
+    the stream URL returns 403 even though it has not expired.
+
+    User-Agent gets its own -user_agent flag because some ffmpeg builds ignore
+    it when folded into the generic -headers blob.
+
+    USED BY: audio.py (audio fetch), frame.py (frame extraction), and
+    probe_media below.
     """
     headers = {k: v for k, v in (http_headers or {}).items() if v}
     args: list[str] = []
@@ -69,6 +94,13 @@ def build_input_headers(http_headers: Optional[dict[str, str]]) -> list[str]:
 
 
 def _tail(text: str, lines: int = 12) -> str:
+    """Last few lines of ffmpeg stderr, for inclusion in an error message.
+
+    WHY TRIM: ffmpeg can emit hundreds of lines, but the actual cause is almost
+    always in the last few. Including the whole stream would bury the diagnosis.
+
+    USED BY: run_ffprobe_json and run_ffmpeg when building FFmpegError messages.
+    """
     stripped = (text or "").strip()
     if not stripped:
         return "(no stderr output)"
@@ -76,7 +108,14 @@ def _tail(text: str, lines: int = 12) -> str:
 
 
 def run_ffprobe_json(args: list[str], timeout: int = 120) -> dict[str, Any]:
-    """Run ffprobe with JSON output and return the parsed document."""
+    """Run ffprobe with JSON output and return the parsed document.
+
+    Raises FFmpegError on a non-zero exit, empty output, or unparseable JSON --
+    all three mean the stream could not be read, and none should be papered over
+    with an empty dict.
+
+    USED BY: probe_media(), which is the interface the rest of the project uses.
+    """
     cmd = [ffprobe_binary(), "-v", "error", "-print_format", "json", *args]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
@@ -106,7 +145,12 @@ def run_ffmpeg(
     """Run ffmpeg, streaming progress and raising FFmpegError on failure.
 
     `-progress pipe:1` gives machine-readable progress on stdout, so this works
-    for any invocation that writes its real output to a file.
+    for any invocation that writes its real output to a file (which is all of
+    ours). Progress is throttled to roughly every 10% so a long transcode does
+    not flood the caller's progress stream.
+
+    USED BY: audio.ensure_audio (long, reports percent) and
+    frame._run_extraction (a single frame, effectively instant).
     """
     cmd = [
         ffmpeg_binary(),
@@ -142,9 +186,11 @@ def run_ffmpeg(
                     last_percent = percent
                     report(
                         progress_callback, stage,
-                        f"{percent:5.1f}%  ({seconds:.1f}s / {total_duration:.1f}s)",
+                        f"{seconds:.1f}s / {total_duration:.1f}s",
+                        percent=percent,
                     )
             elif seconds - last_percent >= 30:
+                # No known duration, so progress is a running total, not a ratio.
                 last_percent = seconds
                 report(progress_callback, stage, f"processed {seconds:.1f}s")
         stderr = proc.communicate(timeout=timeout)[1]
@@ -163,7 +209,15 @@ def probe_media(
     select_streams: Optional[str] = None,
     timeout: int = config.NETWORK_TIMEOUT_SECONDS * 6,
 ) -> dict[str, Any]:
-    """ffprobe a local path or remote URL, returning streams + format sections."""
+    """ffprobe a local path or remote URL, returning streams + format sections.
+
+    For a remote URL this reads only the container header via HTTP range
+    requests -- it does NOT download the media, which is what makes probing a
+    10-minute 1080p video take about a second.
+
+    USED BY: audio.ensure_probe (remote video stream) and audio._validate_wav
+    (local wav file).
+    """
     args: list[str] = []
     if url.startswith(("http://", "https://")):
         args += build_input_headers(http_headers)

@@ -26,12 +26,25 @@ STAGE = "asr"
 
 
 class AsrError(Quest1Error):
-    """Transcription failed or produced unusable output."""
+    """Transcription failed or produced unusable output.
+
+    Covers a model that will not load, a decode that crashes mid-stream, and a
+    transcript that came back with zero words (silent or music-only audio).
+
+    RAISED BY: this module. CAUGHT BY: app/cli.py and app/api.py as a Quest1Error.
+    """
 
 
 @dataclass
 class Word:
-    """One spoken word with the time span it occupies."""
+    """One spoken word with the time span it occupies.
+
+    The start/end times are the entire reason this project works: a frame number
+    is only ever as precise as the word boundary it was derived from.
+
+    USED BY: index.build_flat_text, which normalizes each word and records its
+    character offsets, then persists these to transcript.json.
+    """
 
     word: str          # as Whisper emitted it, minus its leading space
     start: float
@@ -39,12 +52,20 @@ class Word:
     probability: float
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable form. USED BY: index.py when writing transcript.json."""
         return asdict(self)
 
 
 @dataclass
 class Segment:
-    """Whisper's own segmentation, kept for context display and debugging."""
+    """Whisper's own sentence-level segmentation.
+
+    Not used for matching -- matching works on the flat word stream so a query
+    can span a segment boundary. Kept because it is the readable form of the
+    transcript when debugging why a phrase did or did not match.
+
+    USED BY: index.py, which persists these to transcript.json unchanged.
+    """
 
     id: int
     start: float
@@ -52,11 +73,18 @@ class Segment:
     text: str
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-serialisable form, used wherever this is persisted or returned."""
         return asdict(self)
 
 
 @dataclass
 class Transcription:
+    """Everything one ASR run produced.
+
+    Returned by transcribe() and immediately converted into a TranscriptIndex by
+    index.build_index; nothing else consumes this type directly.
+    """
+
     segments: list[Segment]
     words: list[Word]
     language: Optional[str]
@@ -67,7 +95,19 @@ class Transcription:
 
 
 def _load_model(model_name: str, device: str, compute_type: str):
-    """Import and construct the model, turning setup failures into clear errors."""
+    """Import and construct the model, turning setup failures into clear errors.
+
+    WHY THE IMPORT IS INSIDE A FUNCTION: importing faster_whisper pulls in
+    ctranslate2 and onnxruntime, which costs a second or two. Doing it lazily
+    keeps `python -m app.core.resolve` and the not-found query path fast, since
+    neither needs a model.
+
+    WHY THE BROAD EXCEPT: model construction can fail on a download error, a
+    missing model name, insufficient RAM, or an unsupported compute type. All of
+    them need the same actionable message rather than a raw traceback.
+
+    USED BY: transcribe(), below.
+    """
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:  # pragma: no cover - environment problem
@@ -98,8 +138,21 @@ def transcribe(
 ) -> Transcription:
     """Transcribe `wav_path` with word timestamps and VAD.
 
+    The single expensive operation in the whole pipeline: on CPU this runs at
+    roughly 0.7x realtime, so a 10-minute video costs about 7 minutes. That cost
+    is exactly why its output is cached per video and never recomputed for a new
+    query -- see index.ensure_index.
+
+    word_timestamps=True is non-negotiable: without it Whisper returns only
+    sentence-level spans, which are far too coarse to pick a frame from.
+    vad_filter=True trims silence, which both speeds up decoding and stops
+    Whisper hallucinating text over long quiet stretches.
+
     Raises InvalidInputError if the wav is missing, AsrError if the model cannot
     load or the transcript comes back with no words.
+
+    USED BY: index.build_index. Also runnable standalone via the __main__ block
+    for checking what the model actually heard.
     """
     wav = Path(wav_path)
     if not wav.exists():
@@ -169,7 +222,8 @@ def transcribe(
                 percent = min(100.0, segment.end / total * 100)
                 report(
                     progress_callback, STAGE,
-                    f"{percent:5.1f}%  ({segment.end:.1f}s / {total:.1f}s, {len(words)} words)",
+                    f"{segment.end:.1f}s / {total:.1f}s, {len(words)} words so far",
+                    percent=percent,
                 )
     except Exception as exc:  # noqa: BLE001
         raise AsrError(f"Transcription failed mid-stream: {type(exc).__name__}: {exc}") from exc
@@ -199,6 +253,14 @@ def transcribe(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Standalone entry point: transcribe a wav and print the first N words.
+
+    WHY: lets you check ASR quality on its own, without running resolve, audio
+    fetch, matching or frame extraction. If a phrase is not being found, this is
+    the first place to look -- it shows exactly what the model heard.
+
+    USED BY: `python -m app.core.asr <wav> --limit 20`.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m app.core.asr",
         description="Transcribe a wav file to word-level timestamps.",

@@ -44,7 +44,16 @@ _TRANSLATIONS = str.maketrans({
 def normalize_text(text: str) -> str:
     """Fold `text` into the canonical form used by the index and by queries.
 
-    Returns "" for input that contains no matchable characters at all.
+    THE most important function in the project for correctness. It runs in two
+    places that MUST agree: once per word when building the index, and once per
+    query at search time. If those ever diverged, a correct query would silently
+    fail to match a correct transcript, and the bug would look like bad ASR.
+
+    Returns "" for input that contains no matchable characters at all -- callers
+    treat that as invalid input rather than as an empty search.
+
+    USED BY: index.build_flat_text (index time), matching.find_matches (query
+    time), and index.main for display.
     """
     if text is None:
         return ""
@@ -58,7 +67,15 @@ def normalize_text(text: str) -> str:
 
 
 def normalize_tokens(text: str) -> list[str]:
-    """Convenience: normalized text split into whitespace-separated tokens."""
+    """Convenience: normalized text split into whitespace-separated tokens.
+
+    WHY IT EXISTS: some callers want words rather than a flat string (counting
+    query length, debugging). Built on normalize_text so it can never drift from
+    the canonical rules.
+
+    USED BY: the __main__ block below, and available to future callers that need
+    token-level access.
+    """
     normalized = normalize_text(text)
     return normalized.split(" ") if normalized else []
 

@@ -41,7 +41,19 @@ STAGE_PROBE = "probe"
 # --------------------------------------------------------------------------- #
 
 def parse_frame_rate(value: Optional[str]) -> Optional[float]:
-    """ffprobe reports frame rates as 'num/den' strings, e.g. '30000/1001'."""
+    """Parse an ffprobe frame-rate string into a float.
+
+    ffprobe reports rates as exact rationals ('30000/1001' for NTSC 29.97) so no
+    precision is lost in its own output. We need a float to do timestamp->frame
+    arithmetic, but the ORIGINAL string is persisted alongside it so the exact
+    rational is never thrown away.
+
+    Returns None for absent, malformed, or zero-denominator values -- '0/0' is
+    what ffprobe emits when it genuinely does not know, and treating that as 0.0
+    would produce a divide-by-zero later.
+
+    USED BY: ensure_probe (both r_frame_rate and avg_frame_rate).
+    """
     if not value or not isinstance(value, str):
         return None
     if "/" in value:
@@ -60,10 +72,24 @@ def parse_frame_rate(value: Optional[str]) -> Optional[float]:
 
 
 def _atomic_target(final: Path) -> Path:
+    """Temporary sibling path used while a file is still being written.
+
+    WHY ATOMIC WRITES MATTER HERE: every artifact is cached with a "skip if the
+    file exists" check. If an interrupted run left a half-written audio.wav in
+    place, every later run would reuse the truncated file and silently lose
+    dialogue. Writing to .part and renaming means a file that EXISTS is always
+    COMPLETE, which is what makes skip-if-present safe.
+
+    USED BY: ensure_audio and _write_json_atomic.
+    """
     return final.with_suffix(final.suffix + ".part")
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Write JSON via a .part file then rename, so readers never see a partial doc.
+
+    USED BY: ensure_probe. index.py has its own copy for the same reason.
+    """
     temp = _atomic_target(path)
     temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(temp, path)
@@ -74,7 +100,20 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 
 def _validate_wav(wav: Path, expected_duration: float) -> dict[str, Any]:
-    """Confirm the produced wav is real, correctly formatted, and not truncated."""
+    """Confirm the produced wav is real, correctly formatted, and not truncated.
+
+    WHY THIS EXISTS: ffmpeg can exit 0 having produced a file that is unusable --
+    an empty stream, the wrong sample rate, or a stream cut short when the
+    connection dropped. A truncated wav is the dangerous case: ASR would happily
+    transcribe the first half of the video and the pipeline would then report
+    "not found" for any line spoken in the second half, with no indication that
+    anything went wrong.
+
+    Fails loudly rather than returning a flag, because there is no sensible way
+    to continue with bad audio.
+
+    USED BY: ensure_audio, immediately after the transcode.
+    """
     info = ffmpeg.probe_media(str(wav), select_streams="a:0")
     streams = info.get("streams") or []
     if not streams:
@@ -115,8 +154,17 @@ def ensure_audio(
 ) -> Path:
     """Produce data/{media_key}/audio.wav, reusing it if already present.
 
+    ffmpeg streams the AUDIO-ONLY format URL and transcodes on the fly -- the
+    compressed audio is never saved, and no video stream is ever opened. This is
+    the "do not download the video" constraint in practice.
+
+    16kHz mono PCM because that is exactly what Whisper resamples to internally;
+    producing it up front avoids a second resample at transcribe time.
+
     Raises AudioError on a truncated or malformed result, FFmpegError if ffmpeg
     itself fails or is missing.
+
+    USED BY: app/service.py (stage 2). Runnable standalone via __main__.
     """
     paths.ensure_media_dir(media.media_key)
     wav = paths.audio_path(media.media_key)
@@ -190,9 +238,18 @@ def ensure_probe(
 ) -> dict[str, Any]:
     """Produce data/{media_key}/probe.json from the VIDEO stream header.
 
-    Records r_frame_rate and avg_frame_rate separately: when they disagree the
-    video is variable-frame-rate, and a single timestamp->frame calculation is
-    not reliable. Step 5 reads `is_vfr` and refuses to invent a frame number.
+    Reads only the container header via HTTP range requests -- ffprobe does not
+    download the video. For a 10-minute 1080p file this takes about a second.
+
+    Records r_frame_rate and avg_frame_rate SEPARATELY: when they disagree the
+    source is variable-frame-rate, and timestamp x fps is then simply the wrong
+    formula. frame.py reads `is_vfr` and returns a null frame number with an
+    explanation rather than a plausible-looking wrong integer.
+
+    Also persists `source_url` so frame.py can re-resolve a fresh signed URL
+    from a media_key alone.
+
+    USED BY: app/service.py (stage 3) and frame.py (via load_probe).
     """
     paths.ensure_media_dir(media.media_key)
     probe_file = paths.probe_path(media.media_key)
@@ -239,6 +296,11 @@ def ensure_probe(
     fps = avg_rate or r_rate
 
     def _as_float(value: Any) -> Optional[float]:
+        """Coerce an ffprobe field to float, or None when absent/unparseable.
+
+        ffprobe omits duration entirely for some remote video-only streams and
+        emits the string 'N/A' for others, so this must tolerate both.
+        """
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -248,6 +310,9 @@ def ensure_probe(
         "media_key": media.media_key,
         "probed_at": time.time(),
         "source_format_id": media.video.format_id,
+        # Stored so frame.py can re-resolve from a media_key alone: the stream
+        # URL itself is signed and expires, but the page URL does not.
+        "source_url": media.source_url,
         "codec_name": stream.get("codec_name"),
         "width": stream.get("width"),
         "height": stream.get("height"),
@@ -281,7 +346,12 @@ def prepare_media(
     force: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Convenience: both artifacts for a resolved video."""
+    """Convenience: produce both cached artifacts for a resolved video.
+
+    USED BY: callers that want the full Step 2 output in one call. app/service.py
+    calls ensure_audio and ensure_probe separately so it can report which of the
+    two was individually cached.
+    """
     wav = ensure_audio(media, force=force, progress_callback=progress_callback)
     probe = ensure_probe(media, force=force, progress_callback=progress_callback)
     return wav, probe
@@ -292,6 +362,14 @@ def prepare_media(
 # --------------------------------------------------------------------------- #
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Standalone entry point: fetch audio and/or probe a video, then report.
+
+    WHY: makes Step 2 checkable on its own. The printed size-vs-expected ratio is
+    the quickest way to confirm the wav is intact -- 16kHz mono 16-bit PCM is
+    exactly 32000 bytes per second, so the ratio should sit very close to 1.000.
+
+    USED BY: `python -m app.core.audio <video_url> [--probe-only|--audio-only]`.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m app.core.audio",
         description="Fetch audio-only -> 16kHz mono wav, and probe the video stream.",
