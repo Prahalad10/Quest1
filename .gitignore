@@ -1,0 +1,31 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- Generated artifacts / cache ---
+data/
+
+# --- Media & extracted frames (never commit binaries) ---
+*.wav
+*.png
+*.mp3
+*.m4a
+*.webm
+*.mp4
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- Local env config ---
+.env

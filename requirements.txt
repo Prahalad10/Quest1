@@ -1,0 +1,7 @@
+# Quest1 runtime dependencies.
+# System requirement (NOT installed by pip): ffmpeg + ffprobe on PATH.
+# Run `python scripts/check_env.py` after installing to verify everything.
+
+yt-dlp>=2024.8.6          # resolve metadata + audio-only stream URL
+faster-whisper>=1.0.3     # ASR with word_timestamps + VAD (pulls ctranslate2, av, tokenizers)
+rapidfuzz>=3.9.0          # fuzzy substring matching
