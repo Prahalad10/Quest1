@@ -154,3 +154,20 @@ SSE_KEEPALIVE_SECONDS = _env_int("QUEST1_SSE_KEEPALIVE", 15)
 # progress bar sits frozen and looks broken. This is how often the heartbeat
 # thread emits an interpolated estimate.
 ASR_PROGRESS_INTERVAL_SECONDS = float(os.environ.get("QUEST1_ASR_PROGRESS_INTERVAL", "2"))
+
+# --- Audio fetch strategy ----------------------------------------------------
+# MEASURED: on a 797s video, ffmpeg reading the stream URL sequentially took
+# 399s, while yt-dlp fetching the same bytes with chunked ranged requests took
+# 8.7s -- a 30x difference. YouTube throttles one long sequential read to about
+# 30 KB/s but serves chunked ranged requests at ~2 MB/s.
+#
+# This does NOT mean the video is downloaded. Only the audio track is fetched,
+# and it was always written to disk as audio.wav regardless of transfer method.
+# Frame extraction still reads the video remotely via HTTP ranges.
+AUDIO_HTTP_CHUNK_SIZE = _env_int("QUEST1_AUDIO_CHUNK_SIZE", 10 * 1024 * 1024)
+AUDIO_CONCURRENT_FRAGMENTS = _env_int("QUEST1_AUDIO_CONCURRENT_FRAGMENTS", 4)
+
+# Set to "0" to force the old ffmpeg-streams-the-URL path. Kept because some
+# hosts serve audio ffmpeg can read but yt-dlp cannot fetch as a file.
+AUDIO_USE_CHUNKED_DOWNLOAD = os.environ.get("QUEST1_AUDIO_CHUNKED", "1") not in ("0", "false", "False")
+

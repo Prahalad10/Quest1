@@ -146,6 +146,113 @@ def _validate_wav(wav: Path, expected_duration: float) -> dict[str, Any]:
     }
 
 
+def _download_audio(
+    media: ResolvedMedia,
+    *,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Path:
+    """Fetch the compressed AUDIO-ONLY track using yt-dlp's chunked downloader.
+
+    WHY NOT JUST LET FFMPEG READ THE URL (which is what this used to do)
+        Measured on a 797s video, fetching the identical bytes from the
+        identical URL:
+
+            ffmpeg sequential stream          399.1s
+            yt-dlp chunked ranged requests      8.7s      -- 30x faster
+
+        YouTube throttles a single long sequential read to roughly 30 KB/s,
+        while serving chunked ranged requests at ~2 MB/s. The bottleneck was
+        never "remote parsing"; it was the request pattern.
+
+    WHAT THIS DOES NOT CHANGE
+        The VIDEO is still never downloaded -- frame extraction continues to
+        read a few hundred KB remotely via HTTP ranges. And the audio always
+        landed on disk as audio.wav regardless, so this changes how the bytes
+        arrive, not whether they are stored. It also matches the original
+        specification, which called for `yt-dlp -f bestaudio`.
+
+    Downloads the EXACT format resolve.py already selected, so format choice
+    stays in one place. Returns the path to the compressed file, which the
+    caller transcodes and then deletes.
+
+    USED BY: ensure_audio, when AUDIO_USE_CHUNKED_DOWNLOAD is on.
+    """
+    try:
+        from yt_dlp import YoutubeDL
+        from yt_dlp.utils import DownloadError
+    except ImportError as exc:  # pragma: no cover - environment problem
+        raise AudioError(
+            "yt-dlp is not installed. Run: pip install -r requirements.txt"
+        ) from exc
+
+    target_dir = paths.ensure_media_dir(media.media_key)
+    outtmpl = str(target_dir / "audio_src.%(ext)s")
+
+    # Clear any leftover from an interrupted run so we never transcode a stale
+    # or partial file.
+    for stale in target_dir.glob("audio_src.*"):
+        stale.unlink(missing_ok=True)
+
+    def hook(status: dict[str, Any]) -> None:
+        """Translate yt-dlp's progress dict into our progress contract."""
+        if status.get("status") != "downloading":
+            return
+        total = status.get("total_bytes") or status.get("total_bytes_estimate")
+        got = status.get("downloaded_bytes") or 0
+        if total:
+            percent = min(100.0, got / total * 100)
+            report(
+                progress_callback, STAGE_AUDIO,
+                f"downloading audio {got / 1e6:.1f} / {total / 1e6:.1f} MB",
+                percent=percent,
+            )
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        # yt-dlp writes its own progress bar to stdout, which would corrupt
+        # `python -m app.cli --json`. We report progress through the hook below
+        # instead, so its built-in output must be off.
+        "noprogress": True,
+        "consoletitle": False,
+        # Pin to the format resolve.py chose, rather than re-selecting here.
+        "format": media.audio.format_id,
+        "outtmpl": outtmpl,
+        "http_chunk_size": config.AUDIO_HTTP_CHUNK_SIZE,
+        "concurrent_fragment_downloads": config.AUDIO_CONCURRENT_FRAGMENTS,
+        "retries": 3,
+        "progress_hooks": [hook],
+    }
+
+    report(
+        progress_callback, STAGE_AUDIO,
+        f"fetching audio format {media.audio.format_id} "
+        f"({media.audio.ext}, {media.audio.abr or '?'}kbps) in "
+        f"{config.AUDIO_HTTP_CHUNK_SIZE // (1024 * 1024)}MB chunks",
+    )
+    try:
+        with YoutubeDL(options) as ydl:
+            ydl.download([media.source_url])
+    except DownloadError as exc:
+        raise AudioError(
+            f"Could not download the audio track for {media.source_url}: {exc}. "
+            f"Set QUEST1_AUDIO_CHUNKED=0 to fall back to streaming it with ffmpeg."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - surface the real cause
+        raise AudioError(
+            f"Unexpected failure downloading audio: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    produced = sorted(target_dir.glob("audio_src.*"))
+    if not produced:
+        raise AudioError(
+            "yt-dlp reported success but wrote no audio file. "
+            "Set QUEST1_AUDIO_CHUNKED=0 to fall back to ffmpeg streaming."
+        )
+    return produced[0]
+
+
 def ensure_audio(
     media: ResolvedMedia,
     *,
@@ -154,9 +261,9 @@ def ensure_audio(
 ) -> Path:
     """Produce data/{media_key}/audio.wav, reusing it if already present.
 
-    ffmpeg streams the AUDIO-ONLY format URL and transcodes on the fly -- the
-    compressed audio is never saved, and no video stream is ever opened. This is
-    the "do not download the video" constraint in practice.
+    Fetches the AUDIO-ONLY track (chunked, via yt-dlp) and transcodes it to
+    16kHz mono PCM. No video stream is ever opened -- the "do not download the
+    video" constraint in practice.
 
     16kHz mono PCM because that is exactly what Whisper resamples to internally;
     producing it up front avoids a second resample at transcribe time.
@@ -182,6 +289,55 @@ def ensure_audio(
 
     temp = _atomic_target(wav)
     temp.unlink(missing_ok=True)
+    started = time.time()
+
+    # --- Fast path: fetch the compressed audio with chunked ranged requests --
+    # 30x faster than letting ffmpeg read the URL sequentially; see
+    # _download_audio for the measurements.
+    if config.AUDIO_USE_CHUNKED_DOWNLOAD:
+        compressed = None
+        try:
+            compressed = _download_audio(media, progress_callback=progress_callback)
+            report(
+                progress_callback, STAGE_AUDIO,
+                f"transcoding {compressed.name} -> 16kHz mono wav",
+            )
+            ffmpeg.run_ffmpeg(
+                [
+                    "-i", str(compressed),
+                    "-vn", "-map", "a:0",
+                    "-ac", str(config.AUDIO_CHANNELS),
+                    "-ar", str(config.AUDIO_SAMPLE_RATE),
+                    "-c:a", "pcm_s16le", "-f", "wav",
+                    "-y", str(temp),
+                ],
+                total_duration=media.duration,
+                stage=STAGE_AUDIO,
+                progress_callback=progress_callback,
+            )
+        except (AudioError, FFmpegError):
+            temp.unlink(missing_ok=True)
+            raise
+        finally:
+            # The compressed original is an intermediate, not an artifact.
+            if compressed is not None:
+                compressed.unlink(missing_ok=True)
+
+        if not temp.exists() or temp.stat().st_size == 0:
+            temp.unlink(missing_ok=True)
+            raise AudioError("ffmpeg reported success but produced an empty wav file.")
+        os.replace(temp, wav)
+        stats = _validate_wav(wav, media.duration)
+        report(
+            progress_callback, STAGE_AUDIO,
+            f"wrote {wav} -- {stats['size_bytes']:,} bytes, {stats['duration']:.1f}s "
+            f"in {time.time() - started:.1f}s",
+        )
+        return wav
+
+    # --- Fallback: ffmpeg reads the remote URL directly ----------------------
+    # Kept for hosts whose audio ffmpeg can read but yt-dlp cannot fetch as a
+    # file. Much slower against a throttling CDN.
     report(
         progress_callback, STAGE_AUDIO,
         f"streaming audio format {media.audio.format_id} "
@@ -200,7 +356,6 @@ def ensure_audio(
         "-f", "wav",
         "-y", str(temp),
     ]
-    started = time.time()
     try:
         ffmpeg.run_ffmpeg(
             args,

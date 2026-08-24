@@ -85,6 +85,10 @@ class _Heartbeat:
         self._position_at = self._started_at
         self._words = 0
         self._seen_segment = False
+        # Decode rate in audio-seconds per wall-second, recomputed ONLY when a
+        # real segment lands. See _estimate for why it must not be recomputed
+        # on every tick.
+        self._rate = 0.0
 
     def start(self) -> None:
         """Begin emitting. Daemon so it can never hold up interpreter exit."""
@@ -96,10 +100,17 @@ class _Heartbeat:
     def update(self, position: float, words: int) -> None:
         """Record a real segment boundary. CALLED FROM: the transcription loop."""
         with self._lock:
+            now = time.time()
             self._position = float(position)
-            self._position_at = time.time()
+            self._position_at = now
             self._words = words
             self._seen_segment = True
+            # Rate is measured against the time this position was CONFIRMED,
+            # so it reflects actual throughput and stays stable between
+            # segments instead of decaying while we wait for the next one.
+            span = now - self._started_at
+            if span > 0:
+                self._rate = float(position) / span
 
     def stop(self) -> None:
         """Stop emitting and wait briefly for the thread to notice."""
@@ -111,22 +122,24 @@ class _Heartbeat:
         """Return (percent, message) for right now."""
         with self._lock:
             position, position_at = self._position, self._position_at
-            words, seen = self._words, self._seen_segment
+            words, seen, rate = self._words, self._seen_segment, self._rate
         now = time.time()
         elapsed = now - self._started_at
 
-        if not seen or not self._total:
-            # No rate yet: indeterminate, but visibly alive.
+        if not seen or not self._total or rate <= 0:
+            # No confirmed rate yet: indeterminate, but visibly alive.
             return None, f"transcribing… {format_clock(elapsed)} elapsed"
 
-        # Audio-seconds decoded per wall-second, measured over the whole run.
-        rate = position / elapsed if elapsed > 0 else 0.0
-        projected = position + (now - position_at) * rate if rate > 0 else position
-        # Never claim to be further along than the audio actually is.
-        projected = min(projected, self._total)
+        # WHY THE RATE IS NOT RECOMPUTED HERE: an earlier version used
+        # position/elapsed on every tick. Between segments `position` is frozen
+        # while `elapsed` keeps growing, so the rate collapsed and the ETA grew
+        # the longer you waited -- it climbed from 16 to 39 minutes while the
+        # position barely moved, which reads as broken. The rate confirmed by
+        # the last real segment is held steady instead.
+        projected = min(position + (now - position_at) * rate, self._total)
 
         percent = min(100.0, projected / self._total * 100)
-        remaining = (self._total - projected) / rate if rate > 0 else 0.0
+        remaining = (self._total - projected) / rate
         eta = f", ~{format_clock(remaining)} left" if remaining > 2 else ""
         return percent, (
             f"{format_clock(projected)} / {format_clock(self._total)} transcribed, "
