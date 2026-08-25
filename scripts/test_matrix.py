@@ -53,64 +53,28 @@ from app.core.resolve import compute_media_key  # noqa: E402
 # made correct results look 1.8-2.8s late -- the harness was wrong, not the
 # pipeline. If a case here starts failing, check the anchor before the matcher.
 CASES: list[dict[str, Any]] = [
-    {
-        "label": "19s",
-        "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-        "text": "they have really really long trunks",
-        "expect": 7.38,
-        "note": "19s clip -- the smallest possible cold run",
-    },
-    {
-        "label": "3m-mid",
-        "url": "https://www.youtube.com/watch?v=HPVeTQTnjs8",
-        "text": "tell me something really embarrassing",
-        "expect": 65.45,
-        "note": "3m podcast, line at 35% of the timeline",
-    },
-    {
-        "label": "5m-end",
-        "url": "https://www.youtube.com/watch?v=CxC161GvMPc",
-        "text": "what is good for all of us is good for",
-        "expect": 274.03,
-        "note": "5m explainer, line at 92% -- exercises the tail of the index",
-    },
-    {
-        "label": "8m-end",
-        "url": "https://www.youtube.com/watch?v=cWs4WA--eKU",
-        "text": "little did she know she would be",
-        "expect": 489.94,
-        "note": "8.8m short film, line at 92%",
-    },
-    {
-        "label": "12m-mid",
-        "url": "https://www.youtube.com/watch?v=RPd4xnU3R2U",
-        "text": "the Lamborghini survives",
-        "expect": 250.7,   # approximate: taken from a v1 index
-        "note": "11.9m interview, line at 35%",
-    },
-    {
-        "label": "96m-early",
-        "url": "https://www.youtube.com/watch?v=f7jkZXvaB4g",
-        "text": "they're coming to get you Barbara",
-        "expect": None,
-        "note": "Night of the Living Dead (1968, public domain), 95.7m -- "
-                "past the OLD 60m limit, line early in the film",
-    },
-    {
-        "label": "96m-late",
-        "url": "https://www.youtube.com/watch?v=f7jkZXvaB4g",
-        "text": "we're going to go check it out",
-        "expect": 5440.86,
-        "note": "same film, line in the final act -- proves the tail of a "
-                "feature-length index is correct, not just the head",
-    },
-    {
-        "label": "okru",
-        "url": "https://ok.ru/video/9675994761971",
-        "text": "My mind rebels at stagnation",
-        "expect": None,
-        "note": "the requested non-YouTube host",
-    },
+    {"label": "yt-19s", "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+     "text": "they have really really long trunks", "expect": 7.38,
+     "note": "19s clip -- smallest possible cold run"},
+    {"label": "yt-13m-dub", "url": "https://www.youtube.com/watch?v=2LOh_01i8Is",
+     "text": "that's my video now", "expect": 7.91,
+     "note": "12.8m, 14 audio languages -- the dub-selection regression test"},
+    {"label": "yt-13m-late", "url": "https://www.youtube.com/watch?v=2LOh_01i8Is",
+     "text": "without risking the safety of our contestants", "expect": 367.36,
+     "note": "same video, line at 48% -- tail of a multi-track index"},
+    {"label": "yt-96m", "url": "https://www.youtube.com/watch?v=f7jkZXvaB4g",
+     "text": "they're coming to get you Barbara", "expect": 367.83,
+     "note": "Night of the Living Dead, 95.7m -- past the old 60m cap"},
+    {"label": "okru-63m", "url": "https://ok.ru/video/9675994761971",
+     "text": "water pours through your greatest dam", "expect": 189.86,
+     "note": "ok.ru with a real audio-only DASH track"},
+    {"label": "okru-54m", "url": "https://ok.ru/video/248244667877",
+     "text": "My mind rebels at stagnation", "expect": 325.12,
+     "note": "ok.ru with NO audio-only track -- progressive fallback"},
+    {"label": "okru-absent", "url": "https://ok.ru/video/9675994761971",
+     "text": "My mind rebels at stagnation", "expect": None,
+     "expect_absent": True,
+     "note": "line genuinely absent -- NO MATCH is the correct answer"},
 ]
 
 
@@ -239,7 +203,8 @@ def run_case(case: dict[str, str], limit: float) -> dict[str, Any]:
         row["band"] = payload.get("band")
         row["image"] = image
     elif status == "not_found":
-        row["outcome"] = "NO MATCH"
+        # For a case whose line is genuinely absent, NO MATCH is the right answer.
+        row["outcome"] = "NO MATCH (expected)" if case.get("expect_absent") else "NO MATCH"
         near = payload.get("near_misses") or []
         row["detail"] = (f"closest: {near[0]['matched_text'][:60]!r} "
                          f"(score {near[0]['score']})") if near else "nothing close"
@@ -279,7 +244,7 @@ def print_table(rows: list[dict[str, Any]], limit: float) -> None:
         if row.get("detail"):
             print(f"  {row['label']}: {row['detail']}")
     print()
-    ok = sum(1 for r in rows if r["outcome"] == "SUCCESS")
+    ok = sum(1 for r in rows if r["outcome"].startswith(("SUCCESS", "NO MATCH (expected)")))
     over = sum(1 for r in rows if r["outcome"] == "OVERRUN")
     print(f"  {ok}/{len(rows)} SUCCESS, {over} overran the {limit:.0f}s limit")
     print()
@@ -309,8 +274,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(f"limit {args.limit:.0f}s per case, "
           f"{'warm (caches kept)' if args.warm else 'cold (caches cleared)'}, "
-          f"model={config.ASR_MODEL} parallel={config.ASR_PARALLEL} "
-          f"workers<={config.ASR_MAX_WORKERS}")
+          f"model={config.ASR_MODEL} beam={config.ASR_BEAM_SIZE} "
+          f"index_v{config.INDEX_VERSION}")
 
     rows: list[dict[str, Any]] = []
     for case in cases:

@@ -1,11 +1,8 @@
-"""Thin, loud wrapper around the ffmpeg and ffprobe binaries.
+"""Wrapper around the ffmpeg/ffprobe binaries.
 
-Every subprocess call in the project goes through here so that:
-  * a missing binary produces one clear message, not a bare FileNotFoundError,
-  * a non-zero exit always surfaces the tail of ffmpeg's stderr,
-  * remote HTTP inputs get identical header/reconnect handling everywhere.
-
-Used by audio.py (Step 2) and frame.py (Step 5).
+Every subprocess call goes through here so a missing binary gives one clear
+message, a non-zero exit always surfaces ffmpeg's stderr tail, and remote HTTP
+inputs get identical header and reconnect handling.
 """
 
 from __future__ import annotations
@@ -19,24 +16,13 @@ from app import config
 from app.errors import FFmpegError
 from app.progress import ProgressCallback, report
 
-# Applied to every remote HTTP input: a dropped connection mid-fetch should
-# retry rather than silently truncate the output.
-HTTP_RECONNECT_ARGS = [
-    "-reconnect", "1",
-    "-reconnect_streamed", "1",
-    "-reconnect_delay_max", "5",
-]
+# A dropped connection mid-fetch should retry, not silently truncate.
+HTTP_RECONNECT_ARGS = ["-reconnect", "1", "-reconnect_streamed", "1",
+                       "-reconnect_delay_max", "5"]
 
 
-def _binary(name: str) -> str:
-    """Locate an ffmpeg-family binary on PATH, or explain how to install it.
-
-    WHY: a bare FileNotFoundError from subprocess names the binary but gives the
-    user no idea what to do about it. ffmpeg is a SYSTEM dependency that pip
-    cannot install, so the message has to say so explicitly.
-
-    USED BY: ffmpeg_binary() and ffprobe_binary().
-    """
+def binary(name: str) -> str:
+    """ffmpeg is a system dependency pip cannot install, so say so explicitly."""
     path = shutil.which(name)
     if path is None:
         raise FFmpegError(
@@ -46,77 +32,33 @@ def _binary(name: str) -> str:
     return path
 
 
-def ffmpeg_binary() -> str:
-    """Path to the ffmpeg executable.
-
-    USED BY: run_ffmpeg -- i.e. the audio transcode (audio.py) and the frame
-    extraction (frame.py).
-    """
-    return _binary("ffmpeg")
-
-
-def ffprobe_binary() -> str:
-    """Path to the ffprobe executable.
-
-    USED BY: run_ffprobe_json -- i.e. the video probe and the wav validation in
-    audio.py.
-    """
-    return _binary("ffprobe")
-
-
 def build_input_headers(http_headers: Optional[dict[str, str]]) -> list[str]:
-    """Turn yt-dlp's per-format headers into ffmpeg input arguments.
+    """yt-dlp per-format headers -> ffmpeg input args.
 
-    WHY HEADERS MATTER: YouTube's CDN rejects requests whose User-Agent and
-    Referer do not match the session the signed URL was issued to. Without these
-    the stream URL returns 403 even though it has not expired.
-
-    User-Agent gets its own -user_agent flag because some ffmpeg builds ignore
-    it when folded into the generic -headers blob.
-
-    USED BY: audio.py (audio fetch), frame.py (frame extraction), and
-    probe_media below.
+    The CDN rejects requests whose User-Agent does not match the session the
+    signed URL was issued to, so a missing header reads as 403 rather than as
+    an auth problem. User-Agent needs its own flag because some ffmpeg builds
+    ignore it inside the generic -headers blob.
     """
     headers = {k: v for k, v in (http_headers or {}).items() if v}
     args: list[str] = []
-
-    user_agent = None
-    for key in list(headers):
-        if key.lower() == "user-agent":
-            user_agent = headers.pop(key)
+    user_agent = next((headers.pop(k) for k in list(headers) if k.lower() == "user-agent"), None)
     if user_agent:
         args += ["-user_agent", user_agent]
-
     if headers:
-        blob = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
-        args += ["-headers", blob]
+        args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
     return args
 
 
 def _tail(text: str, lines: int = 12) -> str:
-    """Last few lines of ffmpeg stderr, for inclusion in an error message.
-
-    WHY TRIM: ffmpeg can emit hundreds of lines, but the actual cause is almost
-    always in the last few. Including the whole stream would bury the diagnosis.
-
-    USED BY: run_ffprobe_json and run_ffmpeg when building FFmpegError messages.
-    """
+    """ffmpeg can emit hundreds of lines; the cause is in the last few."""
     stripped = (text or "").strip()
-    if not stripped:
-        return "(no stderr output)"
-    return "\n".join(stripped.splitlines()[-lines:])
+    return "\n".join(stripped.splitlines()[-lines:]) if stripped else "(no stderr output)"
 
 
 def run_ffprobe_json(args: list[str], timeout: int = 120) -> dict[str, Any]:
-    """Run ffprobe with JSON output and return the parsed document.
-
-    Raises FFmpegError on a non-zero exit, empty output, or unparseable JSON --
-    all three mean the stream could not be read, and none should be papered over
-    with an empty dict.
-
-    USED BY: probe_media(), which is the interface the rest of the project uses.
-    """
-    cmd = [ffprobe_binary(), "-v", "error", "-print_format", "json", *args]
+    """Run ffprobe and parse its JSON. Any failure means the stream is unreadable."""
+    cmd = [binary("ffprobe"), "-v", "error", "-print_format", "json", *args]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
@@ -144,35 +86,19 @@ def run_ffmpeg(
 ) -> None:
     """Run ffmpeg, streaming progress and raising FFmpegError on failure.
 
-    `-progress pipe:1` gives machine-readable progress on stdout, so this works
-    for any invocation that writes its real output to a file (which is all of
-    ours). Progress is throttled to roughly every 10% so a long transcode does
-    not flood the caller's progress stream.
-
-    USED BY: audio.ensure_audio (long, reports percent) and
-    frame._run_extraction (a single frame, effectively instant).
+    `-progress pipe:1` gives machine-readable progress on stdout, which works
+    because every invocation here writes its real output to a file. Throttled
+    to ~10% steps so a long transcode does not flood the progress stream.
     """
-    cmd = [
-        ffmpeg_binary(),
-        "-hide_banner",
-        "-nostdin",
-        "-loglevel", "error",
-        "-nostats",
-        "-progress", "pipe:1",
-        *args,
-    ]
+    cmd = [binary("ffmpeg"), "-hide_banner", "-nostdin", "-loglevel", "error",
+           "-nostats", "-progress", "pipe:1", *args]
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, bufsize=1)
     except OSError as exc:
         raise FFmpegError(f"Could not run ffmpeg: {exc}") from exc
 
-    last_percent = -10.0
+    last = -10.0
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -182,16 +108,12 @@ def run_ffmpeg(
             seconds = int(value) / 1_000_000
             if total_duration and total_duration > 0:
                 percent = min(100.0, seconds / total_duration * 100)
-                if percent - last_percent >= 10:
-                    last_percent = percent
-                    report(
-                        progress_callback, stage,
-                        f"{seconds:.1f}s / {total_duration:.1f}s",
-                        percent=percent,
-                    )
-            elif seconds - last_percent >= 30:
-                # No known duration, so progress is a running total, not a ratio.
-                last_percent = seconds
+                if percent - last >= 10:
+                    last = percent
+                    report(progress_callback, stage,
+                           f"{seconds:.1f}s / {total_duration:.1f}s", percent=percent)
+            elif seconds - last >= 30:
+                last = seconds  # no known duration: a running total, not a ratio
                 report(progress_callback, stage, f"processed {seconds:.1f}s")
         stderr = proc.communicate(timeout=timeout)[1]
     except subprocess.TimeoutExpired as exc:
@@ -209,14 +131,10 @@ def probe_media(
     select_streams: Optional[str] = None,
     timeout: int = config.NETWORK_TIMEOUT_SECONDS * 6,
 ) -> dict[str, Any]:
-    """ffprobe a local path or remote URL, returning streams + format sections.
+    """ffprobe a local path or remote URL.
 
-    For a remote URL this reads only the container header via HTTP range
-    requests -- it does NOT download the media, which is what makes probing a
-    10-minute 1080p video take about a second.
-
-    USED BY: audio.ensure_probe (remote video stream) and audio._validate_wav
-    (local wav file).
+    For a URL this reads only the container header via range requests, which is
+    why probing a 1080p feature takes about a second.
     """
     args: list[str] = []
     if url.startswith(("http://", "https://")):

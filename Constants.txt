@@ -79,16 +79,6 @@ ASR_BEAM_SIZE      1       QUEST1_ASR_BEAM_SIZE
     being found. Set to 5 to trade the speed back.
 ASR_LANGUAGE       None    QUEST1_ASR_LANGUAGE   None = auto-detect
 ASR_VAD_FILTER     True    QUEST1_ASR_VAD        off = slower + hallucinations
-ASR_PARALLEL       False   QUEST1_ASR_PARALLEL   ("1" enables)
-ASR_MAX_WORKERS    4       QUEST1_ASR_MAX_WORKERS
-ASR_WORKER_THREADS 1       QUEST1_ASR_WORKER_THREADS
-ASR_CHUNK_SECONDS  180     QUEST1_ASR_CHUNK_SECONDS
-ASR_CHUNK_OVERLAP_SECONDS  6   QUEST1_ASR_CHUNK_OVERLAP
-ASR_PARALLEL_MIN_SECONDS   90  QUEST1_ASR_PARALLEL_MIN
-    Chunked multi-process decoding (app/core/asr_parallel.py). OFF by default:
-    it works and its seams are verified, but it was MEASURED and does not pay
-    on this machine -- see section 11. Enable it on hardware with more memory
-    bandwidth or real physical cores. Costs ~0.5 GB per worker.
 ASR_PROGRESS_INTERVAL_SECONDS  2.0   QUEST1_ASR_PROGRESS_INTERVAL
     Heartbeat interval. Needed because faster-whisper only yields a segment once
     it has finished decoding it (30-40s apart on long video), so a bar driven by
@@ -178,15 +168,38 @@ ok.ru serves this film as ~1500 DASH fragments and takes ~12 min. Now .part /
 .ytdl / .part-FragN are KEPT so yt-dlp resumes, and the finished-file selection
 excludes them so a truncated file can never be transcoded.
 
-UNKNOWN CODEC FIELDS ARE NOT "NO VIDEO". ok.ru reports its progressive `sd`
-stream with vcodec=None AND acodec=None. _has_video() required a known vcodec,
-so the only seekable stream was discarded and resolve reported "no plain-HTTP
-video format available" for a video whose MP4 was right there. A format with
-BOTH codec fields unset and a video container extension now counts as video;
-audio-only streams always report a real acodec, so they cannot be caught by it.
+UNKNOWN CODEC FIELDS BROKE THREE SEPARATE SELECTORS. ok.ru reports its
+progressive streams with vcodec=None AND acodec=None, and reports no height or
+bitrate either. Each selector had to be taught the same lesson:
+
+  _has_video()      required a known vcodec, so the only seekable stream was
+                    discarded -> "No plain-HTTP video format available" for a
+                    video whose MP4 was right there.
+  _may_have_audio() (new) some ok.ru videos have NO audio-only track at all --
+                    only HLS plus unknown-codec progressive MP4s. Requiring a
+                    known acodec rejected every candidate -> "No audio stream
+                    found in any available format. Cannot transcribe silent
+                    media." about a film that talks throughout.
+  select_video_format() ranked on (height, tbr). With both unknown every format
+                    tied, max() returned the FIRST, and yt-dlp lists formats
+                    worst-first -- so frames came from `mobile` while `hd` sat
+                    unused. An index tiebreak now picks the better stream.
+                    Verified: 960x720 frame instead of mobile-resolution.
+
+A container with both codec fields unset is assumed to carry what its extension
+implies. Audio-only streams always report a real acodec, so they cannot be
+mistaken for video. If the guess is ever wrong, ffmpeg fails at `-map a:0` with
+a clear message -- better than refusing a usable video up front.
+
+PROGRESSIVE AUDIO IS THE ONE PATH THAT FETCHES VIDEO BYTES. When a host offers
+no audio-only track, the SMALLEST progressive format is downloaded and its audio
+extracted (45 MB for a 54-min episode). ensure_audio warns when this happens.
+The warning used to test `vcodec not in (None,"none")`, which missed exactly
+this case and stayed silent; it now keys off StreamChoice.is_audio_only, decided
+at selection time where the full format dict is still available.
 
 SSL: probe_http_ranges() fails on ok.ru with CERTIFICATE_VERIFY_FAILED. It does
-NOT matter -- range checking is off by default (check_ranges=False), and ffmpeg
+NOT matter -- the range probe was removed as unused, and ffmpeg
 uses its own TLS stack and reads the stream fine. Verified: probe returned
 852x480 @ 29.97fps CFR, and ranged frame extraction succeeded at 2min / 30min /
 60min into the film.
@@ -280,6 +293,33 @@ Refused at resolve (UnsupportedMediaError): playlists, live, upcoming,
 post_live, DRM, missing/non-positive/over-cap duration, no plain-HTTP video.
 
 
+--- 10a. RESOLVE CACHE MUST RE-DERIVE ITS KEY ----------------------------------
+_cached_resolve_is_usable() re-computes media_key from the cached extractor +
+video_id and rejects the entry if it differs.
+
+WHY: everything under data/ is addressed by media_key, and the resolve cache
+STORES that key. A brief change to compute_media_key left entries on disk
+holding the old key, so resolve returned a hit pointing at a directory that did
+not exist -- the pipeline then re-ran a full ASR pass with a perfectly good
+cache sitting beside it, reporting a cache HIT the whole time. Re-deriving the
+key costs one hash and makes that class of failure impossible.
+
+--- 10b. WHAT WAS REMOVED, AND WHY --------------------------------------------
+app/core/asr_parallel.py   (592 lines)  chunked multi-process ASR. Predicted
+    2.5x from thread scaling; measured 1.03-1.11x end to end, because at beam=1
+    the work is memory-BANDWIDTH bound and extra workers contend for one bus.
+    Deleted rather than left switched off. Section 11 keeps the measurement so
+    it is not re-attempted blind.
+scripts/test_series.py     (323 lines)  superseded by scripts/test_matrix.py.
+ResolvedMedia.supports_http_ranges / range_check_detail / has_separate_audio_stream
+    / was_live, and probe_http_ranges()  -- all written, never read. Range
+    checking was off by default and failed on ok.ru's certificate anyway.
+audio.prepare_media(), normalize_tokens(), ffmpeg_binary()/ffprobe_binary()
+    -- unused or collapsed into one public binary().
+
+Tree went 7355 -> 3986 lines. Prose (docstrings + comments) 2803 -> 873, from
+38% of the tree to 22%.
+
 --- 11. PERFORMANCE  (all measured -- do not re-litigate) -----------------------
 THE COST MODEL: ASR dominates, and it scales with SPEECH, not with duration.
 VAD skips silence, so a sparse film is far cheaper per minute than a dense
@@ -314,13 +354,13 @@ WHAT DID NOT WORK, AND WHY (both premises measured false)
   * Coarse/fine two-tier decoding (cheap model locates, accurate model refines).
     tiny is only 1.30x faster than small despite being 6x smaller, and dropping
     word alignment saves ~19%. Removed.
-  * Chunked multi-process decoding (app/core/asr_parallel.py). Thread scaling at
+  * Chunked multi-process decoding (removed, see section 10b). Thread scaling at
     beam=5 predicted 2.5x:
         1 thread 0.81x | 2 threads 1.10x | 4 threads 1.30x | 8 threads 1.18x
     -- a single stream barely uses the machine, so four workers should win.
     END TO END IT DELIVERED 1.03-1.11x. At beam=1 the work is memory-BANDWIDTH
     bound, not compute bound, so extra processes contend for one memory bus.
-    Kept, seam-verified, default OFF. Section 3.
+    Deleted rather than left switched off.
   * A smaller model is NOT reliably faster: base/beam1 measured 92.7s against
     small/beam1's 25.9s on identical audio. Decode cost tracks TOKENS EMITTED,
     and small models emit repetition loops. Do not assume tiny/base are quicker
