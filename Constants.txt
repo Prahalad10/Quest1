@@ -7,18 +7,29 @@ Current values:  python -c "from app import config; [print(k,'=',getattr(config,
 
 --- 0. BASELINE ----------------------------------------------------------------
 git tag `baseline` -> commit a01213b.   git diff baseline | git switch -c exp baseline
+The tag is the pre-speed-work state (beam=5, 1h cap, INDEX_VERSION 1). It is a
+known-good point to return to, NOT the current configuration.
 
 Verified: CLI (found/not-found/playlist/bad-URL -> exit 0/1/2), web (page, SSE,
 frame PNG), check_env 7/7, and 20/20 exact quotes located at 0.00s error across
 4 videos sampled at 2/25/50/75/97% of each timeline (15/24/30 fps).
 
-NOT met: "90 min in seconds". A 90-min video costs ~35 min of ASR on first
-index (4 physical cores, no CUDA). See section 11.
+Re-verified after the speed work (scripts/test_matrix.py, 180s per case):
+    cold  4/7 inside 180s; 3 overran (11.9m, and 95.7m x2)
+    warm  7/7 found, every one 0.00-0.04s from its known timestamp
+    Sampled 19s / 3.1m / 5.0m / 8.8m / 11.9m / 95.7m, lines at 3-93% of each
+    timeline. Feature-length head AND tail both correct (6:07 and 1:30:40).
+
+NOT met: "any 90-min video answered in 1-2 minutes, cold" -- needs ~48x
+realtime, best measured is 8.6x. Section 11 has the full cost model.
 
 
 --- 1. INPUT LIMITS ------------------------------------------------------------
-MAX_VIDEO_DURATION_SECONDS  3600   QUEST1_MAX_DURATION
-    Refuse longer. At 0.39 wall-sec/audio-sec, 1 hour = ~23 min to index.
+MAX_VIDEO_DURATION_SECONDS  7200   QUEST1_MAX_DURATION
+    Refuse longer. Raised from 3600 so a feature-length film is accepted.
+    NOTE THE COST: this is a policy limit, not a promise of speed. At the
+    measured ~3x realtime a 2-hour video is ~40 min of ASR on FIRST index.
+    Repeat queries on an already-indexed video are ~1-3s. See section 11.
 MAX_VIDEO_HEIGHT            1080   QUEST1_MAX_VIDEO_HEIGHT
     Cap on the video format used for frame extraction. 4K costs bytes, adds
     nothing to a single still.
@@ -58,9 +69,26 @@ Enforced in app/core/matching.py.
 ASR_MODEL          small   QUEST1_ASR_MODEL      tiny/base/small/medium/large-v3
 ASR_DEVICE         cpu     QUEST1_ASR_DEVICE     "cuda" if a GPU exists
 ASR_COMPUTE_TYPE   int8    QUEST1_ASR_COMPUTE_TYPE   float16 on GPU
-ASR_BEAM_SIZE      5       QUEST1_ASR_BEAM_SIZE
+ASR_BEAM_SIZE      1       QUEST1_ASR_BEAM_SIZE
+    *** THE BIGGEST SPEED LEVER IN THE PIPELINE. *** 90s of dense speech,
+    small/int8/8 threads, changing only this:
+        beam=5  76.4s  1.18x realtime      beam=1  25.9s  3.47x realtime  (2.95x)
+    Beam search runs the decoder once per beam. The accuracy it buys does not
+    matter here: matching is fuzzy at MATCH_THRESHOLD=70, so a transcript must
+    be wrong by far more than a beam-1/beam-5 disagreement before a line stops
+    being found. Set to 5 to trade the speed back.
 ASR_LANGUAGE       None    QUEST1_ASR_LANGUAGE   None = auto-detect
 ASR_VAD_FILTER     True    QUEST1_ASR_VAD        off = slower + hallucinations
+ASR_PARALLEL       False   QUEST1_ASR_PARALLEL   ("1" enables)
+ASR_MAX_WORKERS    4       QUEST1_ASR_MAX_WORKERS
+ASR_WORKER_THREADS 1       QUEST1_ASR_WORKER_THREADS
+ASR_CHUNK_SECONDS  180     QUEST1_ASR_CHUNK_SECONDS
+ASR_CHUNK_OVERLAP_SECONDS  6   QUEST1_ASR_CHUNK_OVERLAP
+ASR_PARALLEL_MIN_SECONDS   90  QUEST1_ASR_PARALLEL_MIN
+    Chunked multi-process decoding (app/core/asr_parallel.py). OFF by default:
+    it works and its seams are verified, but it was MEASURED and does not pay
+    on this machine -- see section 11. Enable it on hardware with more memory
+    bandwidth or real physical cores. Costs ~0.5 GB per worker.
 ASR_PROGRESS_INTERVAL_SECONDS  2.0   QUEST1_ASR_PROGRESS_INTERVAL
     Heartbeat interval. Needed because faster-whisper only yields a segment once
     it has finished decoding it (30-40s apart on long video), so a bar driven by
@@ -104,7 +132,8 @@ IMAGE is still correct; only the integer is unavailable. Never guess it.
 
 
 --- 6. CACHING -----------------------------------------------------------------
-INDEX_VERSION  1  (not env-overridable)
+INDEX_VERSION  2  (not env-overridable)
+    v2 = ASR_BEAM_SIZE default 5 -> 1. Every v1 index on disk is ignored.
     *** BUMP to invalidate every transcript index on disk. *** Required after
     ANY change to normalize.py rules or the word/segment schema -- a stale index
     yields wrong char offsets and therefore wrong timestamps, silently.
@@ -179,25 +208,61 @@ Refused at resolve (UnsupportedMediaError): playlists, live, upcoming,
 post_live, DRM, missing/non-positive/over-cap duration, no plain-HTTP video.
 
 
---- 11. WHY IT IS NOT FASTER  (measured -- do not re-litigate) ------------------
-A coarse/fine two-tier design (cheap model to locate, accurate model to refine)
-was built and removed: both premises measured false on the same 797s audio.
-    small + word_timestamps ON    2.56x realtime   <- baseline
-    tiny  + word_timestamps ON    3.32x
-    tiny  + word_timestamps OFF   3.94x
-    base  + word_timestamps OFF   1.74x
-=> tiny is only 1.30x faster than small despite being 6x smaller.
-=> dropping word alignment saves only ~19%.
-So the split would add chunk seams, overlap de-dup and a second model load for
-~1.5x. Not worth it.
+--- 11. PERFORMANCE  (all measured -- do not re-litigate) -----------------------
+THE COST MODEL: ASR dominates, and it scales with SPEECH, not with duration.
+VAD skips silence, so a sparse film is far cheaper per minute than a dense
+interview. Measured end-to-end, cold, first index:
 
-Untested leads, cheap to check before any retry:
-  * ctranslate2 defaults intra_threads to physical core count -- a single
-    transcription may already use all cores, in which case process-pool
-    chunking cannot give a linear speedup.
-  * beam_size=5 multiplies decoder passes; beam_size=1 is the obvious test.
+    length  content            audio+probe   ASR      total    x realtime
+      19s   vlog clip                ~6s      ~8s     15.9s      1.2x
+     3.1m   podcast                  ~9s      70s     85.0s      2.2x
+     5.0m   explainer               ~10s     120s    134.8s      2.2x
+     8.8m   short film              ~10s     115s    129.5s      4.1x
+    11.9m   interview (dense)       ~10s     233s    247.3s      2.9x
+    95.7m   feature film (sparse)    62s     666s    ~740s       7.8x  (ASR alone 8.6x)
 
-To actually reach "seconds" on a 90-min video: hosted ASR API, or a CUDA GPU.
-Not CPU restructuring -- at 2.5x realtime that is ~35 min, and even a perfect
-4x leaves ~9 min.
+    The 19s clip is 1.2x only because ~12s of it is fixed overhead (resolve,
+    model load) that does not grow with length. Overhead stops mattering above
+    about a minute.
+
+    Dense speech runs ~2.2-2.9x realtime; sparse ~8.6x. A 90-minute film is
+    ~11-12 min cold, NOT the ~35 min the old baseline implied.
+
+WARM IS THE NORMAL CASE. Once a video is indexed, a new query costs:
+    0.3s   answer + a frame already extracted
+    9.5s   answer + a NEW frame pulled remotely from 90 min into a 1080p stream
+Only the FIRST query on a video pays for ASR.
+
+WHAT WORKED
+  * beam_size 5 -> 1.  2.95x, the single biggest win. See section 3.
+  * yt-dlp chunked ranged audio fetch instead of ffmpeg streaming. 30x on the
+    audio stage. See section 4.
+
+WHAT DID NOT WORK, AND WHY (both premises measured false)
+  * Coarse/fine two-tier decoding (cheap model locates, accurate model refines).
+    tiny is only 1.30x faster than small despite being 6x smaller, and dropping
+    word alignment saves ~19%. Removed.
+  * Chunked multi-process decoding (app/core/asr_parallel.py). Thread scaling at
+    beam=5 predicted 2.5x:
+        1 thread 0.81x | 2 threads 1.10x | 4 threads 1.30x | 8 threads 1.18x
+    -- a single stream barely uses the machine, so four workers should win.
+    END TO END IT DELIVERED 1.03-1.11x. At beam=1 the work is memory-BANDWIDTH
+    bound, not compute bound, so extra processes contend for one memory bus.
+    Kept, seam-verified, default OFF. Section 3.
+  * A smaller model is NOT reliably faster: base/beam1 measured 92.7s against
+    small/beam1's 25.9s on identical audio. Decode cost tracks TOKENS EMITTED,
+    and small models emit repetition loops. Do not assume tiny/base are quicker
+    -- measure.
+
+THE REMAINING GAP
+    "Any 90-minute video answered in 1-2 minutes, cold" is NOT reachable here.
+    It needs ~48x realtime; the best measured is 8.6x on sparse audio and ~2.5x
+    on dense. Closing it needs a hosted ASR API or a CUDA GPU (this machine
+    reports 0 CUDA devices), not more CPU restructuring.
+    What IS delivered: any video up to 2h is accepted; ~10 min of speech indexes
+    inside 3 min cold; every subsequent query on it answers in under 10s.
+
+MACHINE: 4 physical cores / 8 logical, 7.8 GB RAM, no CUDA. Every number above
+is from this machine; they are not portable.
+
 ================================================================================

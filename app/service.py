@@ -59,14 +59,23 @@ STAGE_WEIGHTS: dict[str, float] = {
     "resolve": 3.0,
     "audio": 5.0,
     "probe": 2.0,
-    "asr": 85.0,      # emitted by app/core/asr.py during transcription
-    "index": 2.0,     # index assembly after ASR finishes
+    "index_check": 0.5,   # cache lookup, BEFORE any transcription
+    "asr": 85.0,          # emitted by app/core/asr.py during transcription
+    "index": 1.5,         # index assembly, AFTER ASR finishes
     "match": 1.0,
     "frame": 2.0,
 }
 
 # Order matters: the base offset of a stage is the sum of every earlier weight.
-STAGE_ORDER: list[str] = ["resolve", "audio", "probe", "asr", "index", "match", "frame"]
+#
+# "index_check" and "index" are the same module either side of ASR, and they are
+# listed either side of it for that reason. Collapsing them into one entry put
+# the cache-miss message at the index stage's offset, which -- because the
+# overall percentage never moves backwards -- pinned the bar near 100% for the
+# entire transcription. A stage that reports before ASR must sort before ASR.
+STAGE_ORDER: list[str] = [
+    "resolve", "audio", "probe", "index_check", "asr", "index", "match", "frame",
+]
 
 
 def _stage_base(stage: str) -> float:

@@ -34,9 +34,10 @@ def _env_int(name: str, default: int) -> int:
 DATA_DIR = Path(os.environ.get("QUEST1_DATA_DIR", "data")).resolve()
 
 # --- Input limits ------------------------------------------------------------
-# Videos longer than this are rejected outright: ASR cost grows linearly and a
-# multi-hour CPU transcription is never what the caller wanted.
-MAX_VIDEO_DURATION_SECONDS = _env_int("QUEST1_MAX_DURATION", 3600)
+# Videos longer than this are rejected outright. Raised from 3600 to 7200 so a
+# feature-length film (typically 90-120 minutes) is accepted; the parallel ASR
+# path below is what makes that duration tractable.
+MAX_VIDEO_DURATION_SECONDS = _env_int("QUEST1_MAX_DURATION", 7200)
 
 # --- Format selection --------------------------------------------------------
 # Frame extraction does ranged reads against the remote video stream, so cap the
@@ -69,18 +70,95 @@ ASR_MODEL = os.environ.get("QUEST1_ASR_MODEL", "small")
 ASR_DEVICE = os.environ.get("QUEST1_ASR_DEVICE", "cpu")
 # int8 quantisation is ~2x faster than float32 on CPU with negligible WER cost.
 ASR_COMPUTE_TYPE = os.environ.get("QUEST1_ASR_COMPUTE_TYPE", "int8")
-ASR_BEAM_SIZE = _env_int("QUEST1_ASR_BEAM_SIZE", 5)
+# Greedy decoding. THE SINGLE BIGGEST SPEED LEVER IN THE PIPELINE.
+#
+# MEASURED on 90s of dense speech (small, int8, 8 threads), changing only this:
+#
+#     beam_size=5   76.4s   1.18x realtime
+#     beam_size=1   25.9s   3.47x realtime      <- 2.95x faster
+#
+# Beam search runs the decoder once per beam and keeps the best path, so beam 5
+# is close to five times the decoder work for a marginal accuracy gain. That
+# accuracy gain does not survive contact with this problem: matching is fuzzy
+# (rapidfuzz partial_ratio at MATCH_THRESHOLD=70), so a transcript has to be
+# wrong by far more than a beam-1/beam-5 disagreement before a line stops being
+# found. Validated by scripts/test_matrix.py against known timestamps.
+#
+# Set QUEST1_ASR_BEAM_SIZE=5 to trade the speed back for transcript quality.
+ASR_BEAM_SIZE = _env_int("QUEST1_ASR_BEAM_SIZE", 1)
 # None => auto-detect. Set QUEST1_ASR_LANGUAGE=en to skip detection and force it.
 ASR_LANGUAGE = os.environ.get("QUEST1_ASR_LANGUAGE") or None
 # Voice-activity detection trims silence before decoding: faster, and it stops
 # Whisper hallucinating text over long quiet stretches.
 ASR_VAD_FILTER = os.environ.get("QUEST1_ASR_VAD", "1") not in ("0", "false", "False")
 
+# --- Parallel ASR ------------------------------------------------------------
+# OFF BY DEFAULT, because it was measured and it does not pay on this machine.
+#
+# The idea: one Whisper stream cannot use four cores, so decode different pieces
+# of audio at once. Thread scaling at beam=5 predicted a 2.5x win (see
+# ASR_WORKER_THREADS below). END-TO-END IT DELIVERED ALMOST NOTHING:
+#
+#     529s audio   serial 134.6s (3.93x)   3 workers 121.1s (4.37x)   1.11x
+#     716s audio   serial 252.9s (2.83x)   4 workers 244.6s (2.93x)   1.03x
+#
+# WHY THE PREDICTION FAILED: the thread-scaling table was measured at beam=5,
+# where decoding is compute-bound and idle cores really are idle. Setting
+# beam=1 removes that bottleneck and the workload becomes memory-BANDWIDTH
+# bound -- four processes then contend for one memory bus instead of four
+# separate compute units. Each worker ran at ~0.73x realtime instead of the
+# ~3.4x it manages alone.
+#
+# It is kept, working and seam-tested, because the trade changes on hardware
+# with more memory bandwidth or real physical cores. It costs one model copy
+# per worker (~0.5 GB), which is why it is not on by default on a 7.8 GB
+# machine for a 5% gain. Set QUEST1_ASR_PARALLEL=1 to enable it.
+ASR_PARALLEL = os.environ.get("QUEST1_ASR_PARALLEL", "0") not in ("0", "false", "False")
+
+# Audio shorter than this stays on the single-process path: each worker pays a
+# model load of a few seconds, which would dominate a short clip.
+ASR_PARALLEL_MIN_SECONDS = _env_int("QUEST1_ASR_PARALLEL_MIN", 90)
+
+# Length of the region each chunk OWNS. Smaller chunks balance the pool better
+# on a video whose speech is unevenly distributed, but every chunk restarts the
+# decoder cold, so very small chunks cost accuracy at the seams.
+ASR_CHUNK_SECONDS = float(os.environ.get("QUEST1_ASR_CHUNK_SECONDS", "180"))
+
+# Extra audio decoded either side of a chunk purely as context, then discarded.
+# Long enough to contain a whole spoken sentence so the decoder is never started
+# mid-phrase; output from it is never kept, so this cannot duplicate a word.
+ASR_CHUNK_OVERLAP_SECONDS = float(os.environ.get("QUEST1_ASR_CHUNK_OVERLAP", "6"))
+
+# Upper bound on worker processes. Each worker holds its own copy of the model,
+# so this is a MEMORY limit as much as a CPU one -- this machine has 7.8 GB, and
+# a "small" int8 model costs roughly 0.5 GB resident per worker.
+ASR_MAX_WORKERS = _env_int("QUEST1_ASR_MAX_WORKERS", 4)
+
+# Threads given to EACH worker. One, deliberately.
+#
+# MEASURED on the same 90s of dense speech (small, int8, beam 5), varying only
+# the thread count given to a single stream:
+#
+#     8 threads  76.4s  1.18x realtime      <- slower than 4: this machine has
+#     4 threads  69.4s  1.30x realtime         4 physical cores, and the extra
+#     2 threads  82.2s  1.10x realtime         hyperthreads only add contention
+#     1 thread  111.1s  0.81x realtime
+#
+# Throughput barely moves between 1 and 4 threads, so a single stream cannot
+# use the machine: 4 threads buys only 1.6x over 1 thread. Running FOUR
+# one-thread workers instead gives 4 x 0.81 = 3.24x realtime aggregate, versus
+# 1.30x for one four-thread stream -- a 2.5x speedup from the same cores.
+#
+# More than one thread per worker would also oversubscribe: 4 workers x 2
+# threads is 8 threads on 4 physical cores, which makes every worker slower
+# without finishing any of them sooner.
+ASR_WORKER_THREADS = _env_int("QUEST1_ASR_WORKER_THREADS", 1)
+
 # --- Index -------------------------------------------------------------------
 # Bump this to invalidate every transcript index on disk. Any change to the
 # normalization function, the word schema, or the ASR defaults must bump it,
 # because a stale index would silently produce wrong offsets.
-INDEX_VERSION = 1
+INDEX_VERSION = 2   # v2: ASR_BEAM_SIZE default 5 -> 1, parallel chunked decoding
 
 # --- Matching thresholds -----------------------------------------------------
 # All scores are rapidfuzz partial_ratio values in [0, 100].

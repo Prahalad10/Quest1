@@ -35,12 +35,27 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app import config, paths
-from app.core.asr import Segment, Transcription, Word, transcribe
+from app.core.asr import AsrError, Segment, Transcription, Word, transcribe
+from app.core.asr_parallel import (
+    should_parallelize,
+    transcribe_parallel,
+    wav_duration_seconds,
+)
 from app.core.normalize import normalize_text
 from app.errors import InvalidInputError, Quest1Error
 from app.progress import ProgressCallback, report
 
 STAGE = "index"
+
+# Progress emitted BEFORE transcription starts must not use STAGE.
+#
+# WHY: app/service.py turns per-stage progress into one overall percentage from
+# a stage's position in the pipeline, and that overall percentage is monotonic.
+# "index" sits AFTER "asr", so reporting the cache-miss message under it drove
+# the bar to the index stage's offset and pinned it there for the whole of ASR
+# -- on a feature-length film, 95% for half an hour. This is the same failure
+# the ASR heartbeat was written to fix, arriving by a different route.
+STAGE_CHECK = "index_check"
 
 
 class TranscriptIndexError(Quest1Error):
@@ -218,6 +233,58 @@ def build_flat_text(words: list[Word]) -> tuple[str, list[int], list[Word]]:
     return flat, char_to_word, kept
 
 
+
+def _transcribe_best_path(
+    wav_path: Path | str,
+    *,
+    model_name: Optional[str] = None,
+    language: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Transcription:
+    """Transcribe with whichever ASR path suits this audio, serial or parallel.
+
+    THE ONLY PLACE that decision is made, so nothing downstream has to care:
+    both paths return the same Transcription with the same absolute timestamps.
+
+    Short audio goes to the single-process path in app/core/asr.py, because
+    parallel decoding pays a model load per worker and that overhead outweighs
+    the gain on a clip. Longer audio is split across processes -- see
+    app/core/asr_parallel.py for why the decoder cannot use the cores otherwise.
+
+    A parallel run that fails for an environment reason (no spare memory for N
+    models, a process pool the platform refuses to start) falls back to serial
+    rather than failing the query, and says so. A serial run that then fails is
+    a real failure and propagates.
+
+    USED BY: build_index.
+    """
+    try:
+        duration = wav_duration_seconds(wav_path)
+    except Exception:  # noqa: BLE001 - a header we cannot read is not fatal here
+        duration = 0.0
+
+    if should_parallelize(duration):
+        try:
+            return transcribe_parallel(
+                wav_path,
+                model_name=model_name,
+                language=language,
+                progress_callback=progress_callback,
+            )
+        except AsrError as exc:
+            report(
+                progress_callback, STAGE_CHECK,
+                f"parallel ASR failed ({exc}); falling back to single-process",
+            )
+
+    return transcribe(
+        wav_path,
+        model_name=model_name,
+        language=language,
+        progress_callback=progress_callback,
+    )
+
+
 def build_index(
     media_key: str,
     wav_path: Path | str,
@@ -235,7 +302,7 @@ def build_index(
     USED BY: ensure_index.
     """
     paths.validate_media_key(media_key)
-    result: Transcription = transcribe(
+    result: Transcription = _transcribe_best_path(
         wav_path,
         model_name=model_name,
         language=language,
@@ -414,12 +481,12 @@ def ensure_index(
         cached = load_index(media_key)
         if cached is not None:
             report(
-                progress_callback, STAGE,
+                progress_callback, STAGE_CHECK,
                 f"cache hit: {cached.word_count} words, model={cached.model} "
                 f"(index v{cached.index_version})",
             )
             return cached
-        report(progress_callback, STAGE, "no valid index on disk, running ASR")
+        report(progress_callback, STAGE_CHECK, "no valid index on disk, running ASR")
 
     return build_index(
         media_key,
