@@ -36,7 +36,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from app import config, paths  # noqa: E402
-from app.core.resolve import compute_media_key  # noqa: E402
+from app.core.resolve import resolve  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -89,22 +89,26 @@ def clear_cache(url: str) -> Optional[str]:
     on disk. Timing that and calling it "a 90-minute video in 1.2s" would be a
     lie about the thing being measured. Cold timing is the honest number.
 
-    Returns the media_key it cleared, or None if the URL could not be keyed
-    (an unsupported host, which the run itself will report properly).
+    The media_key is not derivable from the URL alone -- it needs the
+    extractor, video id and title, which only a resolve provides. An earlier
+    version guessed it from the URL, raised TypeError, swallowed it, and
+    cleared nothing at all, so every "cold" run was silently warm.
 
-    USED BY: main(), unless --warm was passed.
+    Returns the media_key it cleared, or None if the URL will not resolve --
+    which the run itself then reports properly.
     """
+    resolve_cache = paths.resolve_cache_path(url)
     try:
-        media_key = compute_media_key(url)
-    except Exception:  # noqa: BLE001 - an unkeyable URL is the case's own problem
+        media = resolve(url)
+    except Exception:  # noqa: BLE001 - an unresolvable URL is the case's own problem
+        resolve_cache.unlink(missing_ok=True)
         return None
-    directory = config.DATA_DIR / media_key
+
+    directory = config.DATA_DIR / media.media_key
     if directory.exists():
         shutil.rmtree(directory, ignore_errors=True)
-    resolve_cache = config.DATA_DIR / "_resolve" / f"{media_key}.json"
-    if resolve_cache.exists():
-        resolve_cache.unlink()
-    return media_key
+    resolve_cache.unlink(missing_ok=True)
+    return media.media_key
 
 
 def kill_tree(process: subprocess.Popen) -> None:

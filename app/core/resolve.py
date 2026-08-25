@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.parse
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Optional
@@ -117,19 +118,67 @@ class ResolvedMedia:
         return min(stamps) if stamps else None
 
 
-def compute_media_key(extractor: str, video_id: str) -> str:
-    """Stable cache key: extractor + video id ONLY, never the stream URL.
+def slugify(text: str) -> str:
+    """Fold arbitrary text into a filesystem-safe lowercase slug.
 
-    Signed URLs rotate on every resolve, so a URL-derived key would miss the
-    cache every time and re-run ASR on every query. The slug aids debugging;
-    the hash stops two ids that sanitize alike from colliding.
-
-    Do not "tidy" this -- the exact bytes hashed determine every path under
-    data/, so any change orphans every cache on disk.
+    Accents are stripped to ASCII rather than dropped, so "Pokémon" becomes
+    "pokemon" and not "pokmon". Titles in a fully non-Latin script legitimately
+    reduce to "" -- callers must have a fallback.
     """
-    digest = hashlib.sha256(f"{extractor}:{video_id}".encode("utf-8")).hexdigest()[:10]
-    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", f"{extractor}-{video_id}").strip("-").lower()
-    return f"{slug[:48]}-{digest}"
+    ascii_text = (unicodedata.normalize("NFKD", text or "")
+                  .encode("ascii", "ignore").decode("ascii"))
+    return re.sub(r"[^A-Za-z0-9]+", "-", ascii_text).strip("-").lower()
+
+
+def media_key_digest(extractor: str, video_id: str) -> str:
+    """The IDENTITY half of a media_key: 10 hex chars of extractor + video id.
+
+    Derived from identity only, never the stream URL (which is signed and
+    rotates) and never the title (which can be edited). This is what makes a
+    key stable, so it must not be "tidied": the exact bytes hashed determine
+    every path under data/.
+    """
+    return hashlib.sha256(f"{extractor}:{video_id}".encode("utf-8")).hexdigest()[:10]
+
+
+def find_existing_media_key(digest: str) -> Optional[str]:
+    """An existing data/ directory for this digest, whatever its title slug.
+
+    Titles get edited. Without this, a renamed video would produce a new
+    directory name, miss its own cache, and re-run a full ASR pass over audio
+    already sitting on disk. The digest is the identity; the slug is only a
+    label, so an existing directory carrying the right digest wins.
+    """
+    try:
+        candidates = [d.name for d in config.DATA_DIR.iterdir()
+                      if d.is_dir() and d.name.endswith(f"-{digest}")]
+    except OSError:
+        return None
+    return sorted(candidates)[0] if candidates else None
+
+
+def compute_media_key(extractor: str, video_id: str, title: Optional[str] = None) -> str:
+    """Cache key: a readable title slug plus a stable identity digest.
+
+    e.g. "me-at-the-zoo-103eea2ce1"
+
+    The slug exists so data/ is browsable -- it carries no meaning. The digest
+    decides identity, so two videos sharing a title cannot collide and a
+    retitled video keeps its cache (see find_existing_media_key).
+
+    Falls back to the video id when a title is absent or slugifies to nothing,
+    which is what happens for a title written entirely in a non-Latin script.
+    """
+    digest = media_key_digest(extractor, video_id)
+
+    existing = find_existing_media_key(digest)
+    if existing:
+        return existing
+
+    slug = slugify(title or "")
+    if not slug:
+        slug = slugify(f"{extractor}-{video_id}")
+    return f"{slug[:60]}-{digest}"
 
 
 def _parse_url_expiry(url: str) -> Optional[int]:
@@ -434,18 +483,19 @@ def _cached_resolve_is_usable(payload: dict[str, Any]) -> bool:
     Erring permissive means a 403 mid-pipeline; erring strict costs one
     re-resolve, so the fallback errs strict.
 
-    THE KEY CHECK IS NOT REDUNDANT. media_key is stored in the entry, and
-    everything under data/ is addressed by it. If compute_media_key ever
-    changes, stale entries keep returning the OLD key, so the pipeline looks in
-    an empty directory and silently re-runs ASR against a cache that is sitting
-    right there. Re-deriving it costs a hash and makes that impossible.
+    THE DIGEST CHECK IS NOT REDUNDANT. media_key is stored in the entry, and
+    everything under data/ is addressed by it. When the key scheme changed,
+    stale entries kept returning the OLD key, so the pipeline looked in an
+    empty directory and silently re-ran ASR against a cache sitting right
+    there -- while reporting a cache HIT. Only the digest is compared: the
+    title slug is a label and is allowed to drift.
     """
     try:
         media = ResolvedMedia.from_dict(payload)
     except (KeyError, TypeError):
         return False
 
-    if media.media_key != compute_media_key(media.extractor, media.video_id):
+    if not media.media_key.endswith("-" + media_key_digest(media.extractor, media.video_id)):
         return False
 
     expires_at = media.stream_urls_expire_at()
@@ -575,12 +625,13 @@ def resolve(
 
     extractor = str(info.get("extractor_key") or info.get("extractor") or "unknown")
     video_id = str(info.get("id") or "")
+    title = str(info.get("title") or "(untitled)")
     media = ResolvedMedia(
-        media_key=compute_media_key(extractor, video_id),
+        media_key=compute_media_key(extractor, video_id, title),
         source_url=url,
         extractor=extractor,
         video_id=video_id,
-        title=str(info.get("title") or "(untitled)"),
+        title=title,
         duration=float(info["duration"]),
         audio=audio,
         video=video,

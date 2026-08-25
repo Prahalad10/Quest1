@@ -230,10 +230,25 @@ RESOLVE_CACHE_TTL_SECONDS 3600  QUEST1_RESOLVE_CACHE_TTL
   data/{media_key}/frames/frame_<ms>.png    keyed by timestamp
   Matching is never cached (milliseconds, query-dependent).
 
-media_key = {extractor}-{video_id}-{sha256(extractor:id)[:10]}
-    Derived from extractor+id ONLY, never the stream URL. Signed URLs rotate on
-    every resolve, so a URL-derived key would miss the cache every time and
-    re-run ASR on every query.
+media_key = {title-slug}-{sha256(extractor:id)[:10]}
+    e.g.  me-at-the-zoo-103eea2ce1
+          the-adventures-of-sherlock-holmes-a-scandal-in-bohemia-jerem-c02e1b060a
+
+    TWO HALVES WITH DIFFERENT JOBS.
+      slug    a label so data/ is browsable. Carries no meaning. NFKD-folded to
+              ASCII ("Pokemon", not "Pokmon"), capped at 60 chars. A title in a
+              non-Latin script slugifies to "" and falls back to the video id.
+      digest  the identity. From extractor + id ONLY -- never the stream URL,
+              which is signed and rotates every resolve, and never the title,
+              which can be edited.
+
+    A RETITLED VIDEO KEEPS ITS CACHE. compute_media_key first scans data/ for a
+    directory ending in the same digest and reuses that name if found
+    (find_existing_media_key). Without it, an upstream rename would produce a
+    new directory, miss its own cache and re-run a full ASR pass over audio
+    already on disk.
+
+    Two videos sharing a title cannot collide -- the digest differs.
 
 
 --- 7. NETWORKING / WEB --------------------------------------------------------
