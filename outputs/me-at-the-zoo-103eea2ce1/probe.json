@@ -1,0 +1,20 @@
+{
+  "media_key": "me-at-the-zoo-103eea2ce1",
+  "probed_at": 1787661925.363183,
+  "source_format_id": "133",
+  "source_url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+  "codec_name": "h264",
+  "width": 320,
+  "height": 240,
+  "r_frame_rate": "15/1",
+  "r_frame_rate_value": 15.0,
+  "avg_frame_rate": "15/1",
+  "avg_frame_rate_value": 15.0,
+  "fps": 15.0,
+  "is_vfr": false,
+  "nb_frames": null,
+  "stream_duration": 18.933333,
+  "container_duration": 18.933333,
+  "duration": 18.933333,
+  "metadata_duration": 19.0
+}

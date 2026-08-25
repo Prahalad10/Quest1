@@ -1,0 +1,13 @@
+{
+  "index_version": 2,
+  "media_key": "me-at-the-zoo-103eea2ce1",
+  "created_at": 1787661938.2280025,
+  "model": "small",
+  "language": "en",
+  "language_probability": 0.9719647765159607,
+  "duration": 19.0635625,
+  "word_count": 36,
+  "segment_count": 4,
+  "normalized_char_count": 183,
+  "asr_elapsed_seconds": 8.971896171569824
+}

@@ -1,0 +1,20 @@
+{
+  "media_key": "how-i-tricked-the-internet-ea3989e9fc",
+  "probed_at": 1787663330.260372,
+  "source_format_id": "137",
+  "source_url": "https://www.youtube.com/watch?v=gfGSGjh77tw",
+  "codec_name": "h264",
+  "width": 1920,
+  "height": 1080,
+  "r_frame_rate": "30000/1001",
+  "r_frame_rate_value": 29.97002997002997,
+  "avg_frame_rate": "30000/1001",
+  "avg_frame_rate_value": 29.97002997002997,
+  "fps": 29.97002997002997,
+  "is_vfr": false,
+  "nb_frames": null,
+  "stream_duration": 582.2817,
+  "container_duration": 582.2817,
+  "duration": 582.2817,
+  "metadata_duration": 582.0
+}

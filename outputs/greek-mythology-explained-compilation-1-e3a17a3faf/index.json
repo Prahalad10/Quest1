@@ -1,0 +1,13 @@
+{
+  "index_version": 2,
+  "media_key": "greek-mythology-explained-compilation-1-e3a17a3faf",
+  "created_at": 1787663206.09401,
+  "model": "small",
+  "language": "en",
+  "language_probability": 0.9993064403533936,
+  "duration": 2123.6970625,
+  "word_count": 8338,
+  "segment_count": 974,
+  "normalized_char_count": 42653,
+  "asr_elapsed_seconds": 953.5030410289764
+}

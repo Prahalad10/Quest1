@@ -9,16 +9,30 @@ venv/
 .venv/
 env/
 
-# --- Generated artifacts / cache ---
-outputs/
+# Generated artifacts. The JSON and the extracted frames ARE committed, as
+# worked examples of the output format. Two things are not:
+#   audio.wav  -- 496 MB of raw PCM, regenerable, shows nothing
+#   _resolve/  -- holds signed CDN URLs with expiry tokens
+# NOTE: gitignore has no inline comments -- a trailing "# ..." becomes part of
+# the pattern and silently matches nothing. Keep comments on their own lines.
+outputs/**/audio.wav
+outputs/_resolve/
 
-# --- Media & extracted frames (never commit binaries) ---
+# Worked examples of commercial video are kept locally but not published.
+# They still work as test cases -- outputs/ is a showcase, not an input.
+outputs/avengers-doomsday-official-trailer-in-theaters-december-18-f9205c9a9a/
+outputs/how-ishowspeed-almost-ruined-my-video-43a873c5a7/
+
+# --- Media (never commit these) ---
 *.wav
-*.png
 *.mp3
 *.m4a
 *.webm
 *.mp4
+*.png
+
+# ...except the extracted frames, which are the actual product output.
+!outputs/**/frames/*.png
 
 # --- Editors / OS ---
 .vscode/

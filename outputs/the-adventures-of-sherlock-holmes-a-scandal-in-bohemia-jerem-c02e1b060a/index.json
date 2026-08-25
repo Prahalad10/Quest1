@@ -1,0 +1,13 @@
+{
+  "index_version": 2,
+  "media_key": "the-adventures-of-sherlock-holmes-a-scandal-in-bohemia-jerem-c02e1b060a",
+  "created_at": 1787664375.2293036,
+  "model": "small",
+  "language": "en",
+  "language_probability": 0.97148197889328,
+  "duration": 3261.7813125,
+  "word_count": 4024,
+  "segment_count": 611,
+  "normalized_char_count": 20363,
+  "asr_elapsed_seconds": 447.86146211624146
+}

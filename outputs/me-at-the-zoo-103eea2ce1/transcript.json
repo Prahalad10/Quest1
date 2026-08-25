@@ -1,0 +1,440 @@
+{
+  "media_key": "me-at-the-zoo-103eea2ce1",
+  "index_version": 2,
+  "model": "small",
+  "language": "en",
+  "language_probability": 0.9719647765159607,
+  "duration": 19.0635625,
+  "created_at": 1787661938.2280025,
+  "asr_elapsed_seconds": 8.971896171569824,
+  "segments": [
+    {
+      "id": 0,
+      "start": 1.02,
+      "end": 3.2,
+      "text": "Alright, so here we are, one of the elephants."
+    },
+    {
+      "id": 1,
+      "start": 4.5,
+      "end": 12.34,
+      "text": "The cool thing about these guys is that they have really, really, really long trunks."
+    },
+    {
+      "id": 2,
+      "start": 12.88,
+      "end": 13.7,
+      "text": "And that's cool."
+    },
+    {
+      "id": 3,
+      "start": 16.66,
+      "end": 18.44,
+      "text": "And that's pretty much all there is to say."
+    }
+  ],
+  "words": [
+    {
+      "word": "Alright,",
+      "start": 1.02,
+      "end": 1.46,
+      "probability": 0.4198496639728546
+    },
+    {
+      "word": "so",
+      "start": 1.54,
+      "end": 1.64,
+      "probability": 0.9686279892921448
+    },
+    {
+      "word": "here",
+      "start": 1.64,
+      "end": 1.78,
+      "probability": 0.9639135599136353
+    },
+    {
+      "word": "we",
+      "start": 1.78,
+      "end": 1.9,
+      "probability": 0.992119550704956
+    },
+    {
+      "word": "are,",
+      "start": 1.9,
+      "end": 2.1,
+      "probability": 0.9979966282844543
+    },
+    {
+      "word": "one",
+      "start": 2.32,
+      "end": 2.48,
+      "probability": 0.9211024641990662
+    },
+    {
+      "word": "of",
+      "start": 2.48,
+      "end": 2.58,
+      "probability": 0.9920908212661743
+    },
+    {
+      "word": "the",
+      "start": 2.58,
+      "end": 2.74,
+      "probability": 0.996823787689209
+    },
+    {
+      "word": "elephants.",
+      "start": 2.74,
+      "end": 3.2,
+      "probability": 0.9212087392807007
+    },
+    {
+      "word": "The",
+      "start": 4.5,
+      "end": 4.94,
+      "probability": 0.46778014302253723
+    },
+    {
+      "word": "cool",
+      "start": 4.94,
+      "end": 5.38,
+      "probability": 0.9885862469673157
+    },
+    {
+      "word": "thing",
+      "start": 5.38,
+      "end": 5.6,
+      "probability": 0.9770170450210571
+    },
+    {
+      "word": "about",
+      "start": 5.6,
+      "end": 6.0,
+      "probability": 0.9792392253875732
+    },
+    {
+      "word": "these",
+      "start": 6.0,
+      "end": 6.22,
+      "probability": 0.9807093143463135
+    },
+    {
+      "word": "guys",
+      "start": 6.22,
+      "end": 6.42,
+      "probability": 0.9895845055580139
+    },
+    {
+      "word": "is",
+      "start": 6.42,
+      "end": 6.7,
+      "probability": 0.8601022958755493
+    },
+    {
+      "word": "that",
+      "start": 6.7,
+      "end": 6.82,
+      "probability": 0.8245406150817871
+    },
+    {
+      "word": "they",
+      "start": 6.82,
+      "end": 7.38,
+      "probability": 0.972197949886322
+    },
+    {
+      "word": "have",
+      "start": 7.38,
+      "end": 7.56,
+      "probability": 0.9857924580574036
+    },
+    {
+      "word": "really,",
+      "start": 7.56,
+      "end": 8.24,
+      "probability": 0.9538540244102478
+    },
+    {
+      "word": "really,",
+      "start": 8.44,
+      "end": 9.5,
+      "probability": 0.9797516465187073
+    },
+    {
+      "word": "really",
+      "start": 9.5,
+      "end": 9.86,
+      "probability": 0.9683867692947388
+    },
+    {
+      "word": "long",
+      "start": 9.86,
+      "end": 10.42,
+      "probability": 0.9527055025100708
+    },
+    {
+      "word": "trunks.",
+      "start": 10.42,
+      "end": 12.34,
+      "probability": 0.5948086902499199
+    },
+    {
+      "word": "And",
+      "start": 12.88,
+      "end": 12.98,
+      "probability": 0.8119211196899414
+    },
+    {
+      "word": "that's",
+      "start": 12.98,
+      "end": 13.54,
+      "probability": 0.9788568913936615
+    },
+    {
+      "word": "cool.",
+      "start": 13.54,
+      "end": 13.7,
+      "probability": 0.8275274634361267
+    },
+    {
+      "word": "And",
+      "start": 16.66,
+      "end": 17.1,
+      "probability": 0.9094818830490112
+    },
+    {
+      "word": "that's",
+      "start": 17.1,
+      "end": 17.36,
+      "probability": 0.9895561635494232
+    },
+    {
+      "word": "pretty",
+      "start": 17.36,
+      "end": 17.48,
+      "probability": 0.9793751835823059
+    },
+    {
+      "word": "much",
+      "start": 17.48,
+      "end": 17.66,
+      "probability": 0.998542070388794
+    },
+    {
+      "word": "all",
+      "start": 17.66,
+      "end": 17.88,
+      "probability": 0.9934626817703247
+    },
+    {
+      "word": "there",
+      "start": 17.88,
+      "end": 18.04,
+      "probability": 0.5372948050498962
+    },
+    {
+      "word": "is",
+      "start": 18.04,
+      "end": 18.14,
+      "probability": 0.8665764331817627
+    },
+    {
+      "word": "to",
+      "start": 18.14,
+      "end": 18.26,
+      "probability": 0.9961286783218384
+    },
+    {
+      "word": "say.",
+      "start": 18.26,
+      "end": 18.44,
+      "probability": 0.9914106130599976
+    }
+  ],
+  "normalized_text": "alright so here we are one of the elephants the cool thing about these guys is that they have really really really long trunks and thats cool and thats pretty much all there is to say",
+  "char_to_word": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    2,
+    2,
+    2,
+    2,
+    2,
+    3,
+    3,
+    3,
+    4,
+    4,
+    4,
+    4,
+    5,
+    5,
+    5,
+    5,
+    6,
+    6,
+    6,
+    7,
+    7,
+    7,
+    7,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    8,
+    9,
+    9,
+    9,
+    9,
+    10,
+    10,
+    10,
+    10,
+    10,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    13,
+    13,
+    13,
+    13,
+    13,
+    13,
+    14,
+    14,
+    14,
+    14,
+    14,
+    15,
+    15,
+    15,
+    16,
+    16,
+    16,
+    16,
+    16,
+    17,
+    17,
+    17,
+    17,
+    17,
+    18,
+    18,
+    18,
+    18,
+    18,
+    19,
+    19,
+    19,
+    19,
+    19,
+    19,
+    19,
+    20,
+    20,
+    20,
+    20,
+    20,
+    20,
+    20,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    21,
+    22,
+    22,
+    22,
+    22,
+    22,
+    23,
+    23,
+    23,
+    23,
+    23,
+    23,
+    23,
+    24,
+    24,
+    24,
+    24,
+    25,
+    25,
+    25,
+    25,
+    25,
+    25,
+    26,
+    26,
+    26,
+    26,
+    26,
+    27,
+    27,
+    27,
+    27,
+    28,
+    28,
+    28,
+    28,
+    28,
+    28,
+    29,
+    29,
+    29,
+    29,
+    29,
+    29,
+    29,
+    30,
+    30,
+    30,
+    30,
+    30,
+    31,
+    31,
+    31,
+    31,
+    32,
+    32,
+    32,
+    32,
+    32,
+    32,
+    33,
+    33,
+    33,
+    34,
+    34,
+    34,
+    35,
+    35,
+    35
+  ]
+}

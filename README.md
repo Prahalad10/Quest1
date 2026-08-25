@@ -217,6 +217,14 @@ keeps its cache** instead of silently re-transcribing.
 Delete a video's folder to force a full recompute, or delete `outputs/` to
 start clean.
 
+**Worked examples are committed.** `outputs/` holds the real artifacts from six
+videos across both hosts, so every output format can be inspected without
+running anything. Excluded from the repo: `audio.wav` (496 MB of raw PCM that
+shows nothing and regenerates on demand), `_resolve/` (cached stream URLs
+carrying expiry tokens), and the artifacts of two commercial videos that are
+still used as test cases. All of it is recreated automatically, so a fresh
+clone works unchanged.
+
 ---
 
 ## 6. Configuration

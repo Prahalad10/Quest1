@@ -1,0 +1,20 @@
+{
+  "media_key": "sherlock-holmes-and-the-voice-of-terror-1942-crime-horror-my-fd6178cf60",
+  "probed_at": 1787665705.3334444,
+  "source_format_id": "sd",
+  "source_url": "https://ok.ru/video/9675994761971",
+  "codec_name": "h264",
+  "width": 852,
+  "height": 480,
+  "r_frame_rate": "30000/1001",
+  "r_frame_rate_value": 29.97002997002997,
+  "avg_frame_rate": "225650000/7529081",
+  "avg_frame_rate_value": 29.97045721781981,
+  "fps": 29.97045721781981,
+  "is_vfr": false,
+  "nb_frames": 112825,
+  "stream_duration": 3764.5405,
+  "container_duration": 3764.650667,
+  "duration": 3764.650667,
+  "metadata_duration": 3764.0
+}

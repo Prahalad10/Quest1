@@ -1,0 +1,13 @@
+{
+  "index_version": 2,
+  "media_key": "night-of-the-living-dead-1968-4k-remastered-full-public-doma-a9c9ec10cf",
+  "created_at": 1787681586.5945554,
+  "model": "small",
+  "language": "en",
+  "language_probability": 0.9971652626991272,
+  "duration": 5742.828875,
+  "word_count": 6376,
+  "segment_count": 738,
+  "normalized_char_count": 32574,
+  "asr_elapsed_seconds": 637.7260119915009
+}

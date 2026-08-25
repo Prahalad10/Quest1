@@ -1,0 +1,20 @@
+{
+  "media_key": "night-of-the-living-dead-1968-4k-remastered-full-public-doma-a9c9ec10cf",
+  "probed_at": 1787679455.8932173,
+  "source_format_id": "137",
+  "source_url": "https://www.youtube.com/watch?v=f7jkZXvaB4g",
+  "codec_name": "h264",
+  "width": 1920,
+  "height": 1080,
+  "r_frame_rate": "30000/1001",
+  "r_frame_rate_value": 29.97002997002997,
+  "avg_frame_rate": "30000/1001",
+  "avg_frame_rate_value": 29.97002997002997,
+  "fps": 29.97002997002997,
+  "is_vfr": false,
+  "nb_frames": null,
+  "stream_duration": 5742.770367,
+  "container_duration": 5742.770367,
+  "duration": 5742.770367,
+  "metadata_duration": 5743.0
+}

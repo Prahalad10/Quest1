@@ -1,0 +1,20 @@
+{
+  "media_key": "the-adventures-of-sherlock-holmes-a-scandal-in-bohemia-jerem-c02e1b060a",
+  "probed_at": 1787662015.641102,
+  "source_format_id": "hd",
+  "source_url": "https://ok.ru/video/248244667877",
+  "codec_name": "h264",
+  "width": 960,
+  "height": 720,
+  "r_frame_rate": "24000/1001",
+  "r_frame_rate_value": 23.976023976023978,
+  "avg_frame_rate": "93844800/3914087",
+  "avg_frame_rate_value": 23.97616608930767,
+  "fps": 23.97616608930767,
+  "is_vfr": false,
+  "nb_frames": 78204,
+  "stream_duration": 3261.739167,
+  "container_duration": 3261.781313,
+  "duration": 3261.781313,
+  "metadata_duration": 3261.0
+}

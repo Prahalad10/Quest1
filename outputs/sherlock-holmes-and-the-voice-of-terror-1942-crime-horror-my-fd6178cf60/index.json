@@ -1,0 +1,13 @@
+{
+  "index_version": 2,
+  "media_key": "sherlock-holmes-and-the-voice-of-terror-1942-crime-horror-my-fd6178cf60",
+  "created_at": 1787666446.9261613,
+  "model": "small",
+  "language": "en",
+  "language_probability": 0.9376983046531677,
+  "duration": 3614.0234375,
+  "word_count": 6897,
+  "segment_count": 1103,
+  "normalized_char_count": 36094,
+  "asr_elapsed_seconds": 737.761950969696
+}

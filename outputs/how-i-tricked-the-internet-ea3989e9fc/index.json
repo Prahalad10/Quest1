@@ -1,0 +1,13 @@
+{
+  "index_version": 2,
+  "media_key": "how-i-tricked-the-internet-ea3989e9fc",
+  "created_at": 1787663504.3831353,
+  "model": "small",
+  "language": "en",
+  "language_probability": 0.9960915446281433,
+  "duration": 582.33325,
+  "word_count": 1704,
+  "segment_count": 269,
+  "normalized_char_count": 8601,
+  "asr_elapsed_seconds": 171.50012111663818
+}
