@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from app import config, paths
 from app.core import ffmpeg
-from app.core.resolve import ResolvedMedia, resolve
+from app.core.resolve import ResolvedMedia, resolve, retry_transient
 from app.errors import AudioError, FFmpegError, Quest1Error
 from app.progress import ProgressCallback, report
 
@@ -188,9 +188,18 @@ def _download_audio(
     target_dir = paths.ensure_media_dir(media.media_key)
     outtmpl = str(target_dir / "audio_src.%(ext)s")
 
-    # Clear any leftover from an interrupted run so we never transcode a stale
-    # or partial file.
+    # Clear COMPLETED leftovers from an earlier run so we never transcode stale
+    # audio -- but deliberately keep yt-dlp's own resume state (.part and .ytdl).
+    #
+    # WHY: a slow or fragmented host can take many minutes for one track. ok.ru
+    # serves this film's audio as ~1500 DASH fragments, and deleting the partial
+    # file meant every interruption restarted a 125 MB download from zero.
+    # yt-dlp validates its own .part against the .ytdl marker before resuming,
+    # so keeping them is safe; the "never transcode a partial file" guarantee is
+    # enforced below instead, where the finished file is selected.
     for stale in target_dir.glob("audio_src.*"):
+        if stale.suffix in (".part", ".ytdl") or ".part-Frag" in stale.name:
+            continue
         stale.unlink(missing_ok=True)
 
     def hook(status: dict[str, Any]) -> None:
@@ -231,9 +240,25 @@ def _download_audio(
         f"({media.audio.ext}, {media.audio.abr or '?'}kbps) in "
         f"{config.AUDIO_HTTP_CHUNK_SIZE // (1024 * 1024)}MB chunks",
     )
-    try:
+    def _download() -> None:
+        """One download attempt. Wrapped so a flaky host gets retried.
+
+        WHY THIS NEEDS RETRYING AT ALL: yt-dlp re-runs the EXTRACTOR here, not
+        just an HTTP GET, so a host that intermittently resets connections can
+        kill the audio fetch even though resolve() already succeeded moments
+        earlier. Retrying only in resolve() moved the failure one stage later
+        instead of fixing it.
+        """
         with YoutubeDL(options) as ydl:
             ydl.download([media.source_url])
+
+    try:
+        retry_transient(
+            _download,
+            description="audio download",
+            stage=STAGE_AUDIO,
+            progress_callback=progress_callback,
+        )
     except DownloadError as exc:
         raise AudioError(
             f"Could not download the audio track for {media.source_url}: {exc}. "
@@ -244,10 +269,17 @@ def _download_audio(
             f"Unexpected failure downloading audio: {type(exc).__name__}: {exc}"
         ) from exc
 
-    produced = sorted(target_dir.glob("audio_src.*"))
+    # Only a FINISHED file may be transcoded. Excluding yt-dlp's scratch files
+    # here is what makes keeping them above safe: a run that died mid-download
+    # leaves .part/.ytdl behind, and picking one of those up would transcode
+    # truncated audio and silently lose the end of the video.
+    produced = [
+        f for f in sorted(target_dir.glob("audio_src.*"))
+        if f.suffix not in (".part", ".ytdl") and ".part-Frag" not in f.name
+    ]
     if not produced:
         raise AudioError(
-            "yt-dlp reported success but wrote no audio file. "
+            "yt-dlp reported success but wrote no complete audio file. "
             "Set QUEST1_AUDIO_CHUNKED=0 to fall back to ffmpeg streaming."
         )
     return produced[0]

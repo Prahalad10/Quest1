@@ -693,6 +693,151 @@ def resolve_cached(
 # Public entry point
 # --------------------------------------------------------------------------- #
 
+
+# Substrings of errors that are worth retrying: a transport that died mid-request
+# rather than a host telling us "no". Matching on message text is crude, but
+# yt-dlp flattens the underlying socket errors into DownloadError, so the
+# exception TYPE carries no useful distinction here.
+TRANSIENT_ERROR_MARKERS = (
+    "forcibly closed",          # WinError 10054, connection reset
+    "connection reset",
+    "connection aborted",
+    "timed out",
+    "temporary failure",
+    "eof occurred",             # TLS handshake cut short
+    "remote end closed",
+    "unable to download webpage",
+    "read operation timed out",
+    "connection refused",
+    "bad gateway",
+    "service unavailable",
+)
+
+
+def is_transient_error(exc: Exception) -> bool:
+    """True when an extraction failure looks like a flaky transport, not a refusal.
+
+    WHY THIS MATTERS: some hosts reset the connection on a share of requests.
+    ok.ru does this from certain networks -- the same URL fails, then succeeds,
+    then fails again with WinError 10054, with no change in between. Reporting
+    the first failure as final makes the tool look broken on a video it can
+    actually handle.
+
+    Deliberately NOT retried: a private/removed video, DRM, an unsupported host,
+    or a 404. Those are stable answers, and retrying them wastes the user's time
+    to arrive at the same place.
+
+    USED BY: _extract_with_retry.
+    """
+    message = str(exc).lower()
+    # These are stable answers, not flaky ones. Keep every marker specific
+    # enough that it cannot match inside an unrelated word -- a bare "age"
+    # matched "unable to download webPAGE" and made the one failure this
+    # function exists to retry look permanent.
+    permanent = (
+        "is private", "video unavailable", "has been removed", "not available",
+        "unsupported url", "drm", "members-only", "sign in to confirm",
+        "age-restricted", "age restricted", "requested format is not available",
+        "http error 404", "http error 403", "http error 410",
+    )
+    if any(m in message for m in permanent):
+        return False
+    return any(marker in message for marker in TRANSIENT_ERROR_MARKERS)
+
+
+
+def retry_transient(
+    operation,
+    *,
+    description: str,
+    stage: str,
+    progress_callback: Optional[ProgressCallback] = None,
+    attempts: Optional[int] = None,
+    backoff: Optional[float] = None,
+):
+    """Call `operation()`, retrying only failures that look like a flaky transport.
+
+    Shared by resolve() and by the audio download, because BOTH re-run the
+    extractor and both therefore hit the same intermittent resets. Fixing the
+    retry in one place and not the other just moves the failure one stage later,
+    which is exactly what happened: resolve started succeeding and the audio
+    fetch then died on its first attempt.
+
+    Re-raises the last exception unchanged once the attempts are exhausted, so
+    the caller keeps its own error wrapping and message.
+
+    USED BY: _extract_with_retry and app/core/audio.py:_download_audio.
+    """
+    attempts = max(1, attempts if attempts is not None else config.RESOLVE_MAX_ATTEMPTS)
+    backoff = backoff if backoff is not None else config.RESOLVE_RETRY_BACKOFF_SECONDS
+
+    for attempt in range(1, attempts + 1):
+        try:
+            result = operation()
+            if attempt > 1:
+                report(progress_callback, stage,
+                       f"{description} succeeded on attempt {attempt}/{attempts}")
+            return result
+        except Exception as exc:  # noqa: BLE001 - classified immediately below
+            if attempt >= attempts or not is_transient_error(exc):
+                raise
+            delay = backoff * attempt
+            report(progress_callback, stage,
+                   f"transient network failure during {description} "
+                   f"(attempt {attempt}/{attempts}); retrying in {delay:.1f}s")
+            time.sleep(delay)
+
+
+def _extract_with_retry(url: str, options: dict[str, Any],
+                        progress_callback: Optional[ProgressCallback]) -> dict[str, Any]:
+    """Run yt-dlp extraction, retrying transient transport failures with backoff.
+
+    Returns the info dict. Raises ResolveError carrying the LAST error, with the
+    attempt count, so a genuine outage is still reported honestly rather than
+    disguised as something subtler.
+
+    USED BY: resolve().
+    """
+    from yt_dlp import YoutubeDL
+    from yt_dlp.utils import DownloadError, ExtractorError
+
+    attempts = max(1, config.RESOLVE_MAX_ATTEMPTS)
+    last: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info:
+                if attempt > 1:
+                    report(progress_callback, STAGE,
+                           f"extraction succeeded on attempt {attempt}/{attempts}")
+                return info
+            last = ResolveError(f"yt-dlp returned no metadata for {url}.")
+        except (DownloadError, ExtractorError) as exc:
+            last = exc
+            if not is_transient_error(exc):
+                raise ResolveError(f"yt-dlp could not resolve {url}: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - surface the real cause
+            last = exc
+            if not is_transient_error(exc):
+                raise ResolveError(
+                    f"Unexpected failure resolving {url}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+        if attempt < attempts:
+            delay = config.RESOLVE_RETRY_BACKOFF_SECONDS * attempt
+            report(progress_callback, STAGE,
+                   f"transient network failure on attempt {attempt}/{attempts}; "
+                   f"retrying in {delay:.1f}s")
+            time.sleep(delay)
+
+    raise ResolveError(
+        f"yt-dlp could not resolve {url} after {attempts} attempts. "
+        f"Last error: {last}"
+    )
+
+
 def resolve(
     url: str,
     *,
@@ -721,8 +866,7 @@ def resolve(
     max_height = config.MAX_VIDEO_HEIGHT if max_height is None else max_height
 
     try:
-        from yt_dlp import YoutubeDL
-        from yt_dlp.utils import DownloadError, ExtractorError
+        import yt_dlp  # noqa: F401  -- imported for the availability check only
     except ImportError as exc:  # pragma: no cover - environment problem, not logic
         raise ResolveError(
             "yt-dlp is not installed. Run: pip install -r requirements.txt"
@@ -737,17 +881,13 @@ def resolve(
         "noplaylist": True,      # a watch?v=...&list=... URL resolves to the single video
         "extract_flat": False,
         "socket_timeout": config.NETWORK_TIMEOUT_SECONDS,
+        # yt-dlp's own retry budget, spent inside a single attempt. Ours wraps
+        # it, because some hosts fail the whole extraction rather than one HTTP
+        # request and yt-dlp's counters never come into play.
+        "retries": config.RESOLVE_HTTP_RETRIES,
+        "extractor_retries": config.RESOLVE_HTTP_RETRIES,
     }
-    try:
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except (DownloadError, ExtractorError) as exc:
-        raise ResolveError(f"yt-dlp could not resolve {url}: {exc}") from exc
-    except Exception as exc:  # noqa: BLE001 - surface the real cause, never guess past it
-        raise ResolveError(f"Unexpected failure resolving {url}: {type(exc).__name__}: {exc}") from exc
-
-    if not info:
-        raise ResolveError(f"yt-dlp returned no metadata for {url}.")
+    info = _extract_with_retry(url, options, progress_callback)
 
     _reject_unsupported(info, url, max_duration)
 

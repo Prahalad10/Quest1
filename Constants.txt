@@ -153,6 +153,44 @@ count_audio_languages(). YouTube publishes the same audio in several codecs
 single-language video. A first version did that, judged every cached wav stale,
 and re-transcribed videos that were already correct.
 
+--- 4c. FLAKY HOSTS AND NON-YOUTUBE SOURCES  (ok.ru) ----------------------------
+RESOLVE_MAX_ATTEMPTS          8   QUEST1_RESOLVE_ATTEMPTS
+RESOLVE_RETRY_BACKOFF_SECONDS 2   QUEST1_RESOLVE_BACKOFF   (linear: N x backoff)
+RESOLVE_HTTP_RETRIES          3   QUEST1_RESOLVE_HTTP_RETRIES  (yt-dlp internal)
+
+ok.ru resets a share of connections (WinError 10054). The SAME url fails, then
+succeeds, then fails, with nothing changed. Observed: one run failed 4 straight
+attempts; the next succeeded on attempt 2. Hence 8, not 4.
+    Only transport-shaped failures retry. A private/removed video, DRM, or a
+    404 is a stable answer and raises immediately -- see is_transient_error()
+    in app/core/resolve.py.
+    CAUTION on the marker list: a bare "age" matched "unable to download
+    webPAGE" and made the one error this exists to retry look permanent. Keep
+    every marker specific enough that it cannot match inside another word.
+
+RETRY BOTH PLACES THAT EXTRACT. resolve() and _download_audio() BOTH run the
+yt-dlp extractor, so retrying only in resolve() moved the failure one stage
+later instead of fixing it. Shared helper: resolve.retry_transient().
+
+RESUMABLE DOWNLOADS. _download_audio used to delete every audio_src.* leftover
+before starting, which restarted a 125 MB fetch from zero on each interruption.
+ok.ru serves this film as ~1500 DASH fragments and takes ~12 min. Now .part /
+.ytdl / .part-FragN are KEPT so yt-dlp resumes, and the finished-file selection
+excludes them so a truncated file can never be transcoded.
+
+UNKNOWN CODEC FIELDS ARE NOT "NO VIDEO". ok.ru reports its progressive `sd`
+stream with vcodec=None AND acodec=None. _has_video() required a known vcodec,
+so the only seekable stream was discarded and resolve reported "no plain-HTTP
+video format available" for a video whose MP4 was right there. A format with
+BOTH codec fields unset and a video container extension now counts as video;
+audio-only streams always report a real acodec, so they cannot be caught by it.
+
+SSL: probe_http_ranges() fails on ok.ru with CERTIFICATE_VERIFY_FAILED. It does
+NOT matter -- range checking is off by default (check_ranges=False), and ffmpeg
+uses its own TLS stack and reads the stream fine. Verified: probe returned
+852x480 @ 29.97fps CFR, and ranged frame extraction succeeded at 2min / 30min /
+60min into the film.
+
 --- 5. FRAME EXTRACTION --------------------------------------------------------
 FRAME_PREROLL_SECONDS            5     QUEST1_FRAME_PREROLL
     Coarse -ss lands this far before target so the decoder has a keyframe; the

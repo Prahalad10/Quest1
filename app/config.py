@@ -76,6 +76,26 @@ AUDIO_TRACK_LANGUAGE = os.environ.get("QUEST1_AUDIO_LANGUAGE") or None
 # --- Networking --------------------------------------------------------------
 NETWORK_TIMEOUT_SECONDS = _env_int("QUEST1_NETWORK_TIMEOUT", 20)
 
+# Some hosts reset a share of connections rather than answering. ok.ru does this
+# from certain networks: the same URL fails with WinError 10054, then succeeds,
+# then fails again, with nothing changed in between. Reporting the first failure
+# as final makes a usable video look unsupported.
+#
+# Only failures that look like a dead transport are retried -- a private video,
+# DRM or a 404 is a stable answer and is raised immediately. See
+# _is_transient_error in app/core/resolve.py.
+# 8, not 4: measured against ok.ru, four consecutive attempts failed on one run
+# while the very next run succeeded on attempt 2. A permanent failure still
+# returns immediately -- is_transient_error() filters those out -- so a larger
+# budget costs time only on a host that is genuinely flaky.
+RESOLVE_MAX_ATTEMPTS = _env_int("QUEST1_RESOLVE_ATTEMPTS", 8)
+
+# Linear backoff: attempt N waits N x this before the next try.
+RESOLVE_RETRY_BACKOFF_SECONDS = float(os.environ.get("QUEST1_RESOLVE_BACKOFF", "2"))
+
+# yt-dlp's own per-request retry budget, spent inside one of our attempts.
+RESOLVE_HTTP_RETRIES = _env_int("QUEST1_RESOLVE_HTTP_RETRIES", 3)
+
 # --- ASR ---------------------------------------------------------------------
 # Model name passed to faster-whisper. "small" is the accuracy/speed sweet spot
 # on CPU; set QUEST1_ASR_MODEL=base or tiny for faster (less accurate) runs, or
