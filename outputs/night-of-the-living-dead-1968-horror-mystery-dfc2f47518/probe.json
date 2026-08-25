@@ -1,0 +1,20 @@
+{
+  "media_key": "night-of-the-living-dead-1968-horror-mystery-dfc2f47518",
+  "probed_at": 1787683836.1065917,
+  "source_format_id": "135",
+  "source_url": "https://www.youtube.com/watch?v=H91BxkBXttE",
+  "codec_name": "h264",
+  "width": 640,
+  "height": 480,
+  "r_frame_rate": "30000/1001",
+  "r_frame_rate_value": 29.97002997002997,
+  "avg_frame_rate": "30000/1001",
+  "avg_frame_rate_value": 29.97002997002997,
+  "fps": 29.97002997002997,
+  "is_vfr": false,
+  "nb_frames": null,
+  "stream_duration": 5717.144767,
+  "container_duration": 5717.144767,
+  "duration": 5717.144767,
+  "metadata_duration": 5717.0
+}
