@@ -10,7 +10,7 @@
 The pipeline runs on a worker thread because it is synchronous and long; the
 event loop only ever reads job state.
 
-    python -m uvicorn app.api:app --port 8000
+    python -m uvicorn src.api:app --port 8000
 """
 
 from __future__ import annotations
@@ -26,16 +26,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import config
-from app.core import ffmpeg
-from app.core.normalize import normalize_text
-from app.core.resolve import _validate_url
-from app.errors import InvalidInputError, Quest1Error, ResolveError, UnsupportedMediaError
-from app.jobs import InMemoryJobStore, Job
-from app.service import find_dialogue
+from src import config
+from src.core import ffmpeg
+from src.core.normalize import normalize_text
+from src.core.resolve import _validate_url
+from src.errors import InvalidInputError, DialogueFrameError, ResolveError, UnsupportedMediaError
+from src.jobs import InMemoryJobStore, Job
+from src.service import find_dialogue
 
 app = FastAPI(
-    title="Quest1",
+    title="DialogueFrame",
     description="Find the video frame where a line of dialogue is spoken.",
     version="0.1.0",
 )
@@ -43,7 +43,7 @@ app = FastAPI(
 # The single place the backend is chosen; a shared store later means changing
 # this line and nothing else.
 STORE = InMemoryJobStore()
-WEB_DIR = Path(__file__).parent / "web"
+
 
 
 class FindRequest(BaseModel):
@@ -71,9 +71,9 @@ def error_body(exc: Exception) -> dict[str, Any]:
     return {"status": "error", "error": str(exc), "error_type": type(exc).__name__}
 
 
-@app.exception_handler(Quest1Error)
-async def quest1_error_handler(request: Request, exc: Quest1Error) -> JSONResponse:
-    """A Quest1Error raised anywhere reaches the client as a readable message
+@app.exception_handler(DialogueFrameError)
+async def dialogueframe_error_handler(request: Request, exc: DialogueFrameError) -> JSONResponse:
+    """A DialogueFrameError raised anywhere reaches the client as a readable message
     rather than a 500 with a traceback."""
     return JSONResponse(status_code=http_status_for(exc), content=error_body(exc))
 
@@ -122,7 +122,7 @@ def _run_job(job: Job, force: bool) -> None:
         result = find_dialogue(job.url, job.text, force=force,
                                progress_callback=job.record_progress)
         job.mark_done(result.to_dict())
-    except Quest1Error as exc:
+    except DialogueFrameError as exc:
         job.mark_error(str(exc), type(exc).__name__)
     except Exception as exc:  # noqa: BLE001 - never leave a job stuck running
         job.mark_error(f"Unexpected {type(exc).__name__}: {exc}", type(exc).__name__)
@@ -146,7 +146,7 @@ async def create_find_job(payload: FindRequest) -> dict[str, Any]:
     job = STORE.create(url, text)
     threading.Thread(
         target=_run_job, args=(job, payload.force),
-        name=f"quest1-job-{job.job_id[:8]}",
+        name=f"dialogueframe-job-{job.job_id[:8]}",
         daemon=True,  # never block interpreter shutdown on an in-flight job
     ).start()
     return {
@@ -219,7 +219,7 @@ async def get_frame(job_id: str) -> FileResponse:
     """Serve the PNG for a finished job.
 
     The path comes from the job's own server-generated result, then is verified
-    to sit inside DATA_DIR anyway -- so a bug upstream cannot become an
+    to sit inside OUTPUT_DIR anyway -- so a bug upstream cannot become an
     arbitrary file read.
     """
     job = _require_job(job_id)
@@ -242,7 +242,7 @@ async def get_frame(job_id: str) -> FileResponse:
 
     path = Path(image_path).resolve()
     try:
-        path.relative_to(config.DATA_DIR.resolve())
+        path.relative_to(config.OUTPUT_DIR.resolve())
     except ValueError as exc:
         raise HTTPException(status_code=403, detail={
             "status": "error",
@@ -267,7 +267,7 @@ async def health() -> dict[str, Any]:
     for name in ("ffmpeg", "ffprobe"):
         try:
             tools[name] = ffmpeg.binary(name)
-        except Quest1Error as exc:
+        except DialogueFrameError as exc:
             tools[name] = f"MISSING: {exc}"
     return {
         "status": "ok",
@@ -275,14 +275,14 @@ async def health() -> dict[str, Any]:
         "asr_model": config.ASR_MODEL,
         "asr_device": f"{config.ASR_DEVICE}/{config.ASR_COMPUTE_TYPE}",
         "index_version": config.INDEX_VERSION,
-        "data_dir": str(config.DATA_DIR),
+        "output_dir": str(config.OUTPUT_DIR),
         "tools": tools,
     }
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    page = WEB_DIR / "index.html"
+    page = config.ASSETS_DIR / "index.html"
     if page.exists():
         return HTMLResponse(page.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>Quest1 API</h1><p>Frontend not installed. See /docs.</p>")
+    return HTMLResponse("<h1>DialogueFrame API</h1><p>Frontend not installed. See /docs.</p>")

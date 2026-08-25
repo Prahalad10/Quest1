@@ -8,7 +8,7 @@ Returns EVERY occurrence above threshold, not just the winner: when a line is
 said more than once only a person can say which one they meant, and silently
 picking one would make a guess look like a fact.
 
-    python -m app.core.matching <media_key> "<dialogue>"
+    python -m src.core.matching <media_key> "<dialogue>"
 """
 
 from __future__ import annotations
@@ -18,11 +18,11 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from app import config, paths
-from app.core.index import TranscriptIndex, load_index
-from app.core.normalize import normalize_text
-from app.errors import InvalidInputError, Quest1Error
-from app.progress import ProgressCallback, report
+from src import config, paths
+from src.core.index import TranscriptIndex, load_index
+from src.core.normalize import normalize_text
+from src.errors import InvalidInputError, DialogueFrameError
+from src.progress import ProgressCallback, report
 
 STAGE = "match"
 
@@ -98,7 +98,7 @@ def _require_rapidfuzz():
     try:
         from rapidfuzz import fuzz
     except ImportError as exc:  # pragma: no cover - environment problem
-        raise Quest1Error("rapidfuzz is not installed. Run: pip install -r requirements.txt") from exc
+        raise DialogueFrameError("rapidfuzz is not installed. Run: pip install -r requirements.txt") from exc
     return fuzz
 
 
@@ -108,7 +108,7 @@ def _build_occurrence(
     """Where character offsets become TIMESTAMPS."""
     try:
         first_word, last_word = index.span_to_word_range(start, end)
-    except Quest1Error:
+    except DialogueFrameError:
         # A span of only separators cannot name a word; skip it rather than
         # report a match with no timestamp.
         return None
@@ -244,7 +244,7 @@ def find_in_media(
     if index is None:
         raise InvalidInputError(
             f"No valid transcript index for {media_key!r}. "
-            f"Run: python -m app.core.index {media_key}"
+            f"Run: python -m src.core.index {media_key}"
         )
     return find_matches(index, query, progress_callback=progress_callback, **kwargs)
 
@@ -258,7 +258,7 @@ def format_timestamp(seconds: float) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m app.core.matching")
+    parser = argparse.ArgumentParser(prog="python -m src.core.matching")
     parser.add_argument("media_key")
     parser.add_argument("text")
     parser.add_argument("--threshold", type=float, default=None)
@@ -266,7 +266,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         result = find_in_media(args.media_key, args.text, threshold=args.threshold)
-    except Quest1Error as exc:
+    except DialogueFrameError as exc:
         print(f"ERROR [{type(exc).__name__}]: {exc}", file=sys.stderr)
         return 2
 

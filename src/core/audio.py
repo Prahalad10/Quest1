@@ -11,7 +11,7 @@ YouTube throttles one long read. This does not download the video -- only the
 audio track. The exception is a host offering no audio-only track, where the
 smallest progressive stream is used and a warning is emitted.
 
-    python -m app.core.audio <url> [--audio-only|--probe-only]
+    python -m src.core.audio <url> [--audio-only|--probe-only]
 """
 
 from __future__ import annotations
@@ -24,11 +24,11 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from app import config, paths
-from app.core import ffmpeg
-from app.core.resolve import ResolvedMedia, resolve, retry_transient
-from app.errors import AudioError, FFmpegError, Quest1Error
-from app.progress import ProgressCallback, report
+from src import config, paths
+from src.core import ffmpeg
+from src.core.resolve import ResolvedMedia, resolve, retry_transient
+from src.errors import AudioError, FFmpegError, DialogueFrameError
+from src.progress import ProgressCallback, report
 
 STAGE_AUDIO = "audio"
 STAGE_PROBE = "probe"
@@ -159,7 +159,7 @@ def _download_audio(
     except DownloadError as exc:
         raise AudioError(
             f"Could not download the audio track for {media.source_url}: {exc}. "
-            f"Set QUEST1_AUDIO_CHUNKED=0 to fall back to streaming it with ffmpeg."
+            f"Set DIALOGUEFRAME_AUDIO_CHUNKED=0 to fall back to streaming it with ffmpeg."
         ) from exc
     except Exception as exc:  # noqa: BLE001 - surface the real cause
         raise AudioError(
@@ -173,7 +173,7 @@ def _download_audio(
     if not produced:
         raise AudioError(
             "yt-dlp reported success but wrote no complete audio file. "
-            "Set QUEST1_AUDIO_CHUNKED=0 to fall back to ffmpeg streaming."
+            "Set DIALOGUEFRAME_AUDIO_CHUNKED=0 to fall back to ffmpeg streaming."
         )
     return produced[0]
 
@@ -247,7 +247,7 @@ def ensure_audio(
     force: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Path:
-    """Produce data/{media_key}/audio.wav, reusing it when it matches the track."""
+    """Produce outputs/{media_key}/audio.wav, reusing it when it matches the track."""
     paths.ensure_media_dir(media.media_key)
     wav = paths.audio_path(media.media_key)
 
@@ -406,7 +406,7 @@ def ensure_probe(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m app.core.audio")
+    parser = argparse.ArgumentParser(prog="python -m src.core.audio")
     parser.add_argument("url")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--audio-only", action="store_true", help="Skip the video probe")
@@ -417,7 +417,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         media = resolve(args.url)
         wav = None if args.probe_only else ensure_audio(media, force=args.force)
         probe = None if args.audio_only else ensure_probe(media, force=args.force)
-    except Quest1Error as exc:
+    except DialogueFrameError as exc:
         print(f"ERROR [{type(exc).__name__}]: {exc}", file=sys.stderr)
         return 2
 

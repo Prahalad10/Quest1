@@ -5,7 +5,7 @@ to the nearest keyframe using byte ranges, reading almost nothing, then a fine
 -ss AFTER -i decodes forward to land on the exact frame. That is the difference
 between a few hundred KB and a full download.
 
-    python -m app.core.frame <media_key> <seconds>
+    python -m src.core.frame <media_key> <seconds>
 """
 
 from __future__ import annotations
@@ -18,17 +18,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from app import config, paths
-from app.core import ffmpeg
-from app.core.resolve import ResolvedMedia, resolve
-from app.errors import FFmpegError, InvalidInputError, Quest1Error
-from app.progress import ProgressCallback, report
+from src import config, paths
+from src.core import ffmpeg
+from src.core.resolve import ResolvedMedia, resolve
+from src.errors import FFmpegError, InvalidInputError, DialogueFrameError
+from src.progress import ProgressCallback, report
 
 STAGE = "frame"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-class FrameError(Quest1Error):
+class FrameError(DialogueFrameError):
     """Raised only after a re-resolve and retry both failed, or ffmpeg reported
     success but produced something that is not a valid PNG."""
 
@@ -111,7 +111,7 @@ def load_probe(media_key: str) -> dict[str, Any]:
     probe_file = paths.probe_path(media_key)
     if not probe_file.exists():
         raise InvalidInputError(
-            f"No probe data at {probe_file}. Run: python -m app.core.audio <video_url>"
+            f"No probe data at {probe_file}. Run: python -m src.core.audio <video_url>"
         )
     try:
         return json.loads(probe_file.read_text(encoding="utf-8"))
@@ -193,7 +193,7 @@ def extract_frame(
             destination.unlink(missing_ok=True)
             try:
                 media = resolve(media.source_url, progress_callback=progress_callback)
-            except Quest1Error as resolve_error:
+            except DialogueFrameError as resolve_error:
                 raise FrameError(
                     f"Frame extraction failed and the URL could not be re-resolved.\n"
                     f"  original error: {first_error}\n"
@@ -258,7 +258,7 @@ def extract_from_media_key(
     if not url:
         raise InvalidInputError(
             f"probe.json for {media_key} has no source_url. Pass --url <video_url>, "
-            f"or re-run: python -m app.core.audio <video_url> --force"
+            f"or re-run: python -m src.core.audio <video_url> --force"
         )
     media = resolve(url, progress_callback=progress_callback)
     if media.media_key != media_key:
@@ -269,7 +269,7 @@ def extract_from_media_key(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m app.core.frame")
+    parser = argparse.ArgumentParser(prog="python -m src.core.frame")
     parser.add_argument("media_key")
     parser.add_argument("seconds", type=float)
     parser.add_argument("--url", default=None, help="Page URL, if probe.json has no source_url")
@@ -280,7 +280,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         result = extract_from_media_key(args.media_key, args.seconds,
                                         source_url=args.url, force=args.force)
-    except Quest1Error as exc:
+    except DialogueFrameError as exc:
         print(f"ERROR [{type(exc).__name__}]: {exc}", file=sys.stderr)
         return 2
 

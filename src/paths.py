@@ -1,6 +1,6 @@
 """On-disk cache layout -- the single source of truth for paths.
 
-    data/
+    outputs/
         _resolve/{sha256(url)[:24]}.json   yt-dlp resolve, keyed by URL
         {media_key}/
             audio.wav          16kHz mono PCM, the ASR input
@@ -21,14 +21,14 @@ import hashlib
 import re
 from pathlib import Path
 
-from app import config
-from app.errors import InvalidInputError
+from src import config
+from src.errors import InvalidInputError
 
 _MEDIA_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{3,128}$")
 
 
 def validate_media_key(media_key: str) -> str:
-    """Reject anything that could escape DATA_DIR.
+    """Reject anything that could escape OUTPUT_DIR.
 
     Not paranoia: api.py takes a media_key from an HTTP request, so without
     this a value like "../../etc/passwd" would reach the filesystem. Every
@@ -45,7 +45,7 @@ def validate_media_key(media_key: str) -> str:
 
 
 def media_dir(media_key: str) -> Path:
-    return config.DATA_DIR / validate_media_key(media_key)
+    return config.OUTPUT_DIR / validate_media_key(media_key)
 
 
 def ensure_media_dir(media_key: str) -> Path:
@@ -88,10 +88,10 @@ def ensure_frames_dir(media_key: str) -> Path:
 def resolve_cache_path(url: str) -> Path:
     """Hashed because URLs contain characters illegal in filenames."""
     digest = hashlib.sha256(url.strip().encode("utf-8")).hexdigest()[:24]
-    return config.DATA_DIR / "_resolve" / f"{digest}.json"
+    return config.OUTPUT_DIR / "_resolve" / f"{digest}.json"
 
 
 def ensure_resolve_cache_dir() -> Path:
-    path = config.DATA_DIR / "_resolve"
+    path = config.OUTPUT_DIR / "_resolve"
     path.mkdir(parents=True, exist_ok=True)
     return path

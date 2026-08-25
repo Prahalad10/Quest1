@@ -35,8 +35,8 @@ from typing import Any, Optional
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from app import config, paths  # noqa: E402
-from app.core.resolve import resolve  # noqa: E402
+from src import config, paths  # noqa: E402
+from src.core.resolve import resolve  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -104,7 +104,7 @@ def clear_cache(url: str) -> Optional[str]:
         resolve_cache.unlink(missing_ok=True)
         return None
 
-    directory = config.DATA_DIR / media.media_key
+    directory = config.OUTPUT_DIR / media.media_key
     if directory.exists():
         shutil.rmtree(directory, ignore_errors=True)
     resolve_cache.unlink(missing_ok=True)
@@ -146,7 +146,7 @@ def run_case(case: dict[str, str], limit: float) -> dict[str, Any]:
     USED BY: main().
     """
     command = [
-        sys.executable, "-u", "-m", "app.cli",
+        sys.executable, "-u", "-m", "src.cli",
         case["url"], case["text"], "--json", "--quiet",
     ]
     started = time.time()

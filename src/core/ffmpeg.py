@@ -12,9 +12,9 @@ import shutil
 import subprocess
 from typing import Any, Optional
 
-from app import config
-from app.errors import FFmpegError
-from app.progress import ProgressCallback, report
+from src import config
+from src.errors import FFmpegError
+from src.progress import ProgressCallback, report
 
 # A dropped connection mid-fetch should retry, not silently truncate.
 HTTP_RECONNECT_ARGS = ["-reconnect", "1", "-reconnect_streamed", "1",

@@ -1,4 +1,4 @@
-# Quest1 runtime dependencies.
+# DialogueFrame runtime dependencies.
 # System requirement (NOT installed by pip): ffmpeg + ffprobe on PATH.
 # Run `python scripts/check_env.py` after installing to verify everything.
 
@@ -6,7 +6,7 @@ yt-dlp>=2024.8.6          # resolve metadata + audio-only stream URL
 faster-whisper>=1.0.3     # ASR with word_timestamps + VAD (pulls ctranslate2, av, tokenizers)
 rapidfuzz>=3.9.0          # fuzzy substring matching
 
-# --- Web layer (Step 8+) ---
+# --- Web layer ---
 fastapi>=0.115.0          # API framework: routing, validation, SSE-friendly
 uvicorn[standard]>=0.30.0 # ASGI server used to run it locally
 python-multipart>=0.0.9   # form-encoded request bodies

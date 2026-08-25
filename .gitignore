@@ -10,7 +10,7 @@ venv/
 env/
 
 # --- Generated artifacts / cache ---
-data/
+outputs/
 
 # --- Media & extracted frames (never commit binaries) ---
 *.wav

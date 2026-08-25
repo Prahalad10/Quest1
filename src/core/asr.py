@@ -7,7 +7,7 @@ The expensive stage -- roughly 2-9x realtime on CPU depending on how densely
 the audio is spoken, since VAD skips silence. That cost is why its output is
 cached per video and never recomputed for a new query.
 
-    python -m app.core.asr data/<media_key>/audio.wav --limit 20
+    python -m src.core.asr outputs/<media_key>/audio.wav --limit 20
 """
 
 from __future__ import annotations
@@ -20,14 +20,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from app import config
-from app.errors import InvalidInputError, Quest1Error
-from app.progress import ProgressCallback, report
+from src import config
+from src.errors import InvalidInputError, DialogueFrameError
+from src.progress import ProgressCallback, report
 
 STAGE = "asr"
 
 
-class AsrError(Quest1Error):
+class AsrError(DialogueFrameError):
     """Model would not load, decode crashed, or the transcript had no words."""
 
 
@@ -110,7 +110,7 @@ class _Heartbeat:
         self._rate = 0.0
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, name="quest1-asr-heartbeat", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="dialogueframe-asr-heartbeat", daemon=True)
         self._thread.start()
 
     def update(self, position: float, words: int) -> None:
@@ -170,7 +170,7 @@ def _load_model(model_name: str, device: str, compute_type: str):
         raise AsrError(
             f"Could not load Whisper model {model_name!r} on {device}/{compute_type}: "
             f"{type(exc).__name__}: {exc}. The first run downloads the model, so check your "
-            f"connection; set QUEST1_ASR_MODEL to a smaller model if RAM is the issue."
+            f"connection; set DIALOGUEFRAME_ASR_MODEL to a smaller model if RAM is the issue."
         ) from exc
 
 
@@ -194,7 +194,7 @@ def transcribe(
     """
     wav = Path(wav_path)
     if not wav.exists():
-        raise InvalidInputError(f"Audio file not found: {wav}. Run app.core.audio first.")
+        raise InvalidInputError(f"Audio file not found: {wav}. Run src.core.audio first.")
     if wav.stat().st_size == 0:
         raise InvalidInputError(f"Audio file is empty: {wav}")
 
@@ -269,8 +269,8 @@ def transcribe(
 def main(argv: Optional[list[str]] = None) -> int:
     """Shows what the model actually heard -- the first place to look when a
     phrase is not found, before touching MATCH_THRESHOLD."""
-    parser = argparse.ArgumentParser(prog="python -m app.core.asr")
-    parser.add_argument("wav", help="Path to a 16kHz mono wav (see app.core.audio)")
+    parser = argparse.ArgumentParser(prog="python -m src.core.asr")
+    parser.add_argument("wav", help="Path to a 16kHz mono wav (see src.core.audio)")
     parser.add_argument("--limit", type=int, default=25, help="How many words to print")
     parser.add_argument("--model", default=None)
     parser.add_argument("--language", default=None)
@@ -278,7 +278,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         result = transcribe(args.wav, model_name=args.model, language=args.language)
-    except Quest1Error as exc:
+    except DialogueFrameError as exc:
         print(f"ERROR [{type(exc).__name__}]: {exc}", file=sys.stderr)
         return 2
 

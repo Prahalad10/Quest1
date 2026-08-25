@@ -14,13 +14,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from app import config, paths
-from app.core import frame as frame_mod
-from app.core.audio import ensure_audio, ensure_probe
-from app.core.index import ensure_index
-from app.core.matching import MatchResult, find_matches, format_timestamp
-from app.core.resolve import ResolvedMedia, resolve_cached
-from app.progress import ProgressCallback, report, stderr_progress
+from src import config, paths
+from src.core import frame as frame_mod
+from src.core.audio import ensure_audio, ensure_probe
+from src.core.index import ensure_index
+from src.core.matching import MatchResult, find_matches, format_timestamp
+from src.core.resolve import ResolvedMedia, resolve_cached
+from src.progress import ProgressCallback, report, stderr_progress
 
 STAGE = "pipeline"
 
@@ -158,7 +158,7 @@ def find_dialogue(
 ) -> DialogueResult:
     """Locate the frame where `text` is spoken in the video at `url`.
 
-    Raises Quest1Error subclasses whose messages are written to be shown to a
+    Raises DialogueFrameError subclasses whose messages are written to be shown to a
     user verbatim. A not_found result carries near_misses so the caller can show
     what the transcript actually says instead of fabricating an answer.
     """

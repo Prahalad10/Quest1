@@ -12,7 +12,7 @@ rapidfuzz returns character offsets; word timestamps live per word. This array
 is the bridge. Separators are attributed to the word on their LEFT, so callers
 must trim a span before mapping it -- span_to_word_range does that.
 
-    python -m app.core.index <media_key> --limit 20
+    python -m src.core.index <media_key> --limit 20
 """
 
 from __future__ import annotations
@@ -26,11 +26,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from app import config, paths
-from app.core.asr import Segment, Transcription, Word, transcribe
-from app.core.normalize import normalize_text
-from app.errors import Quest1Error
-from app.progress import ProgressCallback, report
+from src import config, paths
+from src.core.asr import Segment, Transcription, Word, transcribe
+from src.core.normalize import normalize_text
+from src.errors import DialogueFrameError
+from src.progress import ProgressCallback, report
 
 STAGE = "index"
 
@@ -41,7 +41,7 @@ STAGE = "index"
 STAGE_CHECK = "index_check"
 
 
-class TranscriptIndexError(Quest1Error):
+class TranscriptIndexError(DialogueFrameError):
     """Index is corrupt or internally inconsistent.
 
     A STALE index (version mismatch) is not an error -- load_index returns None
@@ -323,7 +323,7 @@ def ensure_index(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m app.core.index")
+    parser = argparse.ArgumentParser(prog="python -m src.core.index")
     parser.add_argument("media_key")
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--force", action="store_true", help="Rebuild even if cached")
@@ -335,7 +335,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         index = ensure_index(args.media_key, paths.audio_path(args.media_key),
                              force=args.force, model_name=args.model, language=args.language)
-    except Quest1Error as exc:
+    except DialogueFrameError as exc:
         print(f"ERROR [{type(exc).__name__}]: {exc}", file=sys.stderr)
         return 2
 

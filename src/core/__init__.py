@@ -1,4 +1,4 @@
-"""Pipeline stages, each runnable on its own: python -m app.core.<module> --help
+"""Pipeline stages, each runnable on its own: python -m src.core.<module> --help
 
 Running one stage at a time is how you tell a mishearing from a match failure.
 
@@ -11,5 +11,5 @@ Running one stage at a time is how you tell a mishearing from a match failure.
     matching   fuzzy search over that index
     frame      timestamp -> frame number -> PNG via ranged seek
 
-Nothing here knows about HTTP or the CLI; orchestration is app/service.py.
+Nothing here knows about HTTP or the CLI; orchestration is src/service.py.
 """

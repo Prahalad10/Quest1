@@ -1,6 +1,6 @@
 """Terminal front end -- a thin wrapper over service.find_dialogue.
 
-    python -m app.cli <video_url> "<dialogue text>"
+    python -m src.cli <video_url> "<dialogue text>"
 
 Exit codes are distinct so a script can tell "not in this video" from "broken":
     0 found | 1 no match (near misses printed) | 2 error
@@ -13,10 +13,10 @@ import json
 import sys
 from typing import Optional
 
-from app.core.matching import format_timestamp
-from app.errors import Quest1Error
-from app.progress import ProgressCallback, null_progress
-from app.service import DialogueResult, find_dialogue
+from src.core.matching import format_timestamp
+from src.errors import DialogueFrameError
+from src.progress import ProgressCallback, null_progress
+from src.service import DialogueResult, find_dialogue
 
 
 def print_result(result: DialogueResult) -> None:
@@ -65,7 +65,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     """Returns the exit code rather than calling sys.exit, so it stays callable
     from another process or a test."""
     parser = argparse.ArgumentParser(
-        prog="python -m app.cli",
+        prog="python -m src.cli",
         description="Find the video frame where a line of dialogue is spoken.",
     )
     parser.add_argument("url", help="Video URL (a single video, not a playlist)")
@@ -80,8 +80,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         result = find_dialogue(args.url, args.text, force=args.force, progress_callback=progress)
-    except Quest1Error as exc:
-        # Every Quest1Error message is written to be shown to a user, so print
+    except DialogueFrameError as exc:
+        # Every DialogueFrameError message is written to be shown to a user, so print
         # it plainly -- a stack trace here would be noise, not information.
         if args.json:
             print(json.dumps({"status": "error", "error": str(exc),

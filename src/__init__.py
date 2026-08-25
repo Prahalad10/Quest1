@@ -1,6 +1,6 @@
-"""Quest1 -- find the video frame where a line of dialogue is spoken.
+"""DialogueFrame -- find the video frame where a line of dialogue is spoken.
 
-Pipeline (app/service.py:find_dialogue): resolve -> audio -> probe -> index
+Pipeline (src/service.py:find_dialogue): resolve -> audio -> probe -> index
 -> match -> frame. Indexing is expensive and cached per video; querying is
 cheap, which is why a repeat search skips ASR entirely.
 

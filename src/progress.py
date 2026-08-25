@@ -1,7 +1,7 @@
 """Progress callback shared by every stage.
 
 Core modules call report(); the CALLER decides where events go by passing a
-callback. That is why app/core/* never imports anything web-related and the
+callback. That is why src/core/* never imports anything web-related and the
 same code serves the CLI and the SSE endpoint.
 
 Contract: callback(stage, percent, message). percent is 0-100 within that

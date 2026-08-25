@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from app import config
+from src import config
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"

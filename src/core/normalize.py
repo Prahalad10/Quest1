@@ -8,7 +8,7 @@ NFKC -> fold typographic quotes -> hyphen/slash/underscore to space (so
 "well-known" matches spoken "well known") -> drop non-alphanumerics (so "don't"
 == "dont") -> collapse whitespace.
 
-    python -m app.core.normalize "Don't -- you DARE!"
+    python -m src.core.normalize "Don't -- you DARE!"
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def normalize_text(text: str) -> str:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print('usage: python -m app.core.normalize "<text>"', file=sys.stderr)
+        print('usage: python -m src.core.normalize "<text>"', file=sys.stderr)
         raise SystemExit(2)
     for raw in sys.argv[1:]:
         print(f"{raw!r} -> {normalize_text(raw)!r}")

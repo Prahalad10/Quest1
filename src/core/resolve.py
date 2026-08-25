@@ -14,7 +14,7 @@ Three things here are load-bearing and were each a real bug:
     neither vcodec nor acodec, and requiring known codecs discarded the only
     usable stream.
 
-    python -m app.core.resolve <url>
+    python -m src.core.resolve <url>
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ import urllib.parse
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Optional
 
-from app import config, paths
-from app.errors import InvalidInputError, Quest1Error, ResolveError, UnsupportedMediaError
-from app.progress import ProgressCallback, report
+from src import config, paths
+from src.errors import InvalidInputError, DialogueFrameError, ResolveError, UnsupportedMediaError
+from src.progress import ProgressCallback, report
 
 STAGE = "resolve"
 
@@ -136,13 +136,13 @@ def media_key_digest(extractor: str, video_id: str) -> str:
     Derived from identity only, never the stream URL (which is signed and
     rotates) and never the title (which can be edited). This is what makes a
     key stable, so it must not be "tidied": the exact bytes hashed determine
-    every path under data/.
+    every path under outputs/.
     """
     return hashlib.sha256(f"{extractor}:{video_id}".encode("utf-8")).hexdigest()[:10]
 
 
 def find_existing_media_key(digest: str) -> Optional[str]:
-    """An existing data/ directory for this digest, whatever its title slug.
+    """An existing outputs/ directory for this digest, whatever its title slug.
 
     Titles get edited. Without this, a renamed video would produce a new
     directory name, miss its own cache, and re-run a full ASR pass over audio
@@ -150,7 +150,7 @@ def find_existing_media_key(digest: str) -> Optional[str]:
     label, so an existing directory carrying the right digest wins.
     """
     try:
-        candidates = [d.name for d in config.DATA_DIR.iterdir()
+        candidates = [d.name for d in config.OUTPUT_DIR.iterdir()
                       if d.is_dir() and d.name.endswith(f"-{digest}")]
     except OSError:
         return None
@@ -162,7 +162,7 @@ def compute_media_key(extractor: str, video_id: str, title: Optional[str] = None
 
     e.g. "me-at-the-zoo-103eea2ce1"
 
-    The slug exists so data/ is browsable -- it carries no meaning. The digest
+    The slug exists so outputs/ is browsable -- it carries no meaning. The digest
     decides identity, so two videos sharing a title cannot collide and a
     retitled video keeps its cache (see find_existing_media_key).
 
@@ -325,7 +325,7 @@ def _reject_unsupported(info: dict[str, Any], url: str, max_duration: int) -> No
     if duration > max_duration:
         raise UnsupportedMediaError(
             f"{url} is {duration:.0f}s long, over the {max_duration}s cap. "
-            "Raise QUEST1_MAX_DURATION to allow it."
+            "Raise DIALOGUEFRAME_MAX_DURATION to allow it."
         )
 
 
@@ -484,7 +484,7 @@ def _cached_resolve_is_usable(payload: dict[str, Any]) -> bool:
     re-resolve, so the fallback errs strict.
 
     THE DIGEST CHECK IS NOT REDUNDANT. media_key is stored in the entry, and
-    everything under data/ is addressed by it. When the key scheme changed,
+    everything under outputs/ is addressed by it. When the key scheme changed,
     stale entries kept returning the OLD key, so the pipeline looked in an
     empty directory and silently re-ran ASR against a cache sitting right
     there -- while reporting a cache HIT. Only the digest is compared: the
@@ -599,7 +599,7 @@ def resolve(
     try:
         info = retry_transient(extract, description="metadata extraction", stage=STAGE,
                                progress_callback=progress_callback)
-    except Quest1Error:
+    except DialogueFrameError:
         raise
     except Exception as exc:  # noqa: BLE001 - surface the real cause
         raise ResolveError(f"yt-dlp could not resolve {url}: {exc}") from exc
@@ -621,7 +621,7 @@ def resolve(
     if track_count > 1:
         report(progress_callback, STAGE,
                f"{track_count} audio languages available; using {audio.language or 'original'} "
-               f"(set QUEST1_AUDIO_LANGUAGE to choose another)")
+               f"(set DIALOGUEFRAME_AUDIO_LANGUAGE to choose another)")
 
     extractor = str(info.get("extractor_key") or info.get("extractor") or "unknown")
     video_id = str(info.get("id") or "")
@@ -643,13 +643,13 @@ def resolve(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m app.core.resolve")
+    parser = argparse.ArgumentParser(prog="python -m src.core.resolve")
     parser.add_argument("url")
     parser.add_argument("--force", action="store_true", help="Ignore the resolve cache")
     args = parser.parse_args(argv)
     try:
         media, cached = resolve_cached(args.url, force=args.force)
-    except Quest1Error as exc:
+    except DialogueFrameError as exc:
         print(f"ERROR [{type(exc).__name__}]: {exc}", file=sys.stderr)
         return 2
     print(media.to_json())
