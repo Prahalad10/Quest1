@@ -119,6 +119,40 @@ AUDIO_CONCURRENT_FRAGMENTS  4      QUEST1_AUDIO_CONCURRENT_FRAGMENTS
     audio was always written to disk regardless. Frames still read remotely.
 
 
+--- 4b. AUDIO TRACK SELECTION  (multi-language uploads) -------------------------
+AUDIO_TRACK_LANGUAGE  None  QUEST1_AUDIO_LANGUAGE
+    None = the ORIGINAL track. Set a code ("hi", "es") to transcribe that dub
+    on purpose; honoured only if a track in that language exists.
+
+*** THIS WAS A SILENT WRONG-ANSWER BUG, NOT A CRASH. ***
+    A MrBeast upload carried 14 audio tracks: one English original
+    (language_preference=10) and 13 dubs (-1), several dubs at a HIGHER bitrate
+    than the original. select_audio_format ranked on bitrate alone and chose the
+    ARABIC dub. The video transcribed cleanly into Arabic (lang=ar, p=0.99), and
+    every English query returned "not found" with no error anywhere -- nothing
+    had failed, we had simply transcribed the wrong soundtrack.
+
+    Selection order is now: requested language > language_preference > bitrate.
+    See _track_rank / select_audio_format in app/core/resolve.py.
+
+TWO CACHE RULES THIS DEPENDS ON -- both were needed, one was not enough:
+  1. data/{media_key}/audio.meta.json records WHICH track the wav came from.
+     audio.wav used to be reused on existence alone, so a wav built from a dub
+     survived the fix. A mismatch now forces a re-fetch.
+     The signed URL is deliberately NOT part of the signature: it rotates, and
+     including it would re-download the audio on every run.
+  2. Re-fetching audio DELETES transcript.json and index.json. Without this the
+     English audio was fetched correctly and the Arabic transcript was then
+     served from cache -- still the wrong answer, still no error. The transcript
+     is a pure function of the audio; invalidating the input must invalidate
+     everything derived from it.
+
+COUNT LANGUAGES, NOT FORMATS. ResolvedMedia.audio_track_count uses
+count_audio_languages(). YouTube publishes the same audio in several codecs
+(139/140/249/250/251), so counting audio-only FORMATS returns 5+ for an ordinary
+single-language video. A first version did that, judged every cached wav stale,
+and re-transcribed videos that were already correct.
+
 --- 5. FRAME EXTRACTION --------------------------------------------------------
 FRAME_PREROLL_SECONDS            5     QUEST1_FRAME_PREROLL
     Coarse -ss lands this far before target so the decoder has a keyframe; the

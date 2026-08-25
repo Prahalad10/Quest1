@@ -59,6 +59,20 @@ AUDIO_BYTES_PER_SECOND = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * 2
 AUDIO_DURATION_TOLERANCE_SECONDS = _env_int("QUEST1_AUDIO_TOLERANCE", 2)
 AUDIO_DURATION_TOLERANCE_RATIO = 0.05
 
+# --- Audio track selection ---------------------------------------------------
+# Which audio track to transcribe on a multi-language upload. None = the
+# ORIGINAL track, which is what you almost always want.
+#
+# WHY THIS EXISTS: YouTube multi-language uploads carry the original plus a set
+# of dubs, and dubs are often encoded at a HIGHER bitrate than the original.
+# Choosing on bitrate alone picked an Arabic dub of an English video, which
+# transcribed cleanly into Arabic and made every English query return
+# "not found" with no error to explain it.
+#
+# Set to a language code (e.g. "hi") to transcribe that dub on purpose. It is
+# honoured only when a track in that language exists.
+AUDIO_TRACK_LANGUAGE = os.environ.get("QUEST1_AUDIO_LANGUAGE") or None
+
 # --- Networking --------------------------------------------------------------
 NETWORK_TIMEOUT_SECONDS = _env_int("QUEST1_NETWORK_TIMEOUT", 20)
 

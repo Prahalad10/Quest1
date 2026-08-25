@@ -73,6 +73,10 @@ class StreamChoice:
     tbr: Optional[float] = None
     filesize: Optional[int] = None
     format_note: Optional[str] = None
+    # Which audio track this is. On a multi-language upload these decide whether
+    # we transcribe the original or a dub -- see select_audio_format.
+    language: Optional[str] = None
+    language_preference: Optional[int] = None
     http_headers: dict[str, str] = field(default_factory=dict)
     expires_at: Optional[int] = None  # unix ts parsed from the signed URL, if present
 
@@ -105,6 +109,11 @@ class ResolvedMedia:
     supports_http_ranges: bool
     range_check_detail: str
     resolved_at: float
+    # How many distinct audio-only tracks the source offered. >1 means this is a
+    # multi-language upload, where picking the wrong track transcribes the wrong
+    # language perfectly and silently. Used by audio.py to decide whether a wav
+    # cached before track selection existed can still be trusted.
+    audio_track_count: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         """Plain-dict form. USED BY: to_json and the __main__ JSON output."""
@@ -271,12 +280,34 @@ def _is_video_only(fmt: dict[str, Any]) -> bool:
     return fmt.get("vcodec") not in (None, "none") and fmt.get("acodec") in (None, "none")
 
 
+# Containers that carry video. Used only when a host leaves the codec fields
+# unset, so the extension is the only evidence available.
+VIDEO_CONTAINER_EXTS = frozenset({
+    "mp4", "m4v", "webm", "mkv", "mov", "flv", "avi", "3gp", "ts",
+})
+
+
 def _has_video(fmt: dict[str, Any]) -> bool:
     """True for any format carrying a video stream, progressive or video-only.
 
+    THE UNKNOWN-CODEC CASE IS NOT A CORNER CASE. Some extractors report neither
+    vcodec nor acodec for their progressive stream -- ok.ru is one. Requiring a
+    known vcodec discarded that stream, and since every other format the host
+    offered was HLS or DASH, resolve then reported "no plain-HTTP video format
+    available" for a video whose progressive MP4 was sitting right there and was
+    perfectly seekable.
+
+    A format with BOTH codec fields unset and a video container extension is
+    therefore treated as carrying video. This cannot misclassify an audio-only
+    stream: those report a real acodec, which excludes them from this branch.
+
     USED BY: select_video_format and select_audio_format.
     """
-    return fmt.get("vcodec") not in (None, "none")
+    if fmt.get("vcodec") not in (None, "none"):
+        return True
+    if fmt.get("vcodec") is None and fmt.get("acodec") is None:
+        return (fmt.get("ext") or "").lower() in VIDEO_CONTAINER_EXTS
+    return False
 
 
 def _usable(fmt: dict[str, Any]) -> bool:
@@ -310,6 +341,8 @@ def _to_choice(fmt: dict[str, Any]) -> StreamChoice:
         tbr=fmt.get("tbr"),
         filesize=fmt.get("filesize") or fmt.get("filesize_approx"),
         format_note=fmt.get("format_note"),
+        language=fmt.get("language"),
+        language_preference=fmt.get("language_preference"),
         http_headers=dict(fmt.get("http_headers") or {}),
         expires_at=_parse_url_expiry(url),
     )
@@ -378,12 +411,72 @@ def _reject_unsupported(info: dict[str, Any], url: str, max_duration: int) -> No
 # Format selection
 # --------------------------------------------------------------------------- #
 
-def select_audio_format(formats: list[dict[str, Any]]) -> dict[str, Any]:
-    """Best audio-only stream: highest bitrate wins.
+def _track_rank(fmt: dict[str, Any], prefer_language: Optional[str]) -> tuple:
+    """Sort key for choosing between audio tracks. Higher is better.
 
-    Bitrate is the right criterion because ASR accuracy tracks audio quality and
-    the file is transcoded to 16kHz mono immediately anyway, so container size
-    barely matters.
+    ORDER OF PRECEDENCE
+      1. An explicitly requested language (QUEST1_AUDIO_LANGUAGE), if it exists.
+      2. yt-dlp's language_preference, which marks the ORIGINAL/default track.
+      3. Bitrate.
+
+    WHY LANGUAGE OUTRANKS BITRATE: a multi-language upload carries the original
+    plus a set of dubs, and the dubs are frequently encoded at a HIGHER bitrate
+    than the original. Sorting on bitrate alone therefore picks a dub more or
+    less at random. See select_audio_format for what that cost us.
+
+    USED BY: select_audio_format.
+    """
+    language = (fmt.get("language") or "").lower()
+    requested = 1 if (prefer_language and language == prefer_language.lower()) else 0
+    # yt-dlp marks the original/default track 10 and every dub -1. Absent on
+    # single-track uploads, where the value is the same for all candidates and
+    # so cannot change the outcome.
+    preference = fmt.get("language_preference")
+    preference = -1 if preference is None else int(preference)
+    bitrate = fmt.get("abr") or fmt.get("tbr") or 0.0
+    return (requested, preference, bitrate)
+
+
+
+def count_audio_languages(formats: list[dict[str, Any]]) -> int:
+    """How many distinct audio LANGUAGES the source offers.
+
+    *** COUNT LANGUAGES, NOT FORMATS. *** YouTube publishes the same audio in
+    several codecs and bitrates (139, 140, 249, 250, 251...), so counting
+    audio-only FORMATS returns five-plus for an ordinary single-language video.
+    An earlier version did exactly that, decided every cached wav was from a
+    multi-track upload, and re-fetched and re-transcribed every video that was
+    already correctly cached.
+
+    Returns 1 when the source labels no languages at all, which is the common
+    case outside YouTube and means the question does not arise.
+
+    USED BY: resolve(), to set ResolvedMedia.audio_track_count, which audio.py
+    uses to decide whether a wav cached before track selection can be trusted.
+    """
+    languages = {
+        (f.get("language") or "").lower()
+        for f in formats if _usable(f) and _is_audio_only(f)
+    }
+    languages.discard("")
+    return max(1, len(languages))
+
+
+def select_audio_format(
+    formats: list[dict[str, Any]], prefer_language: Optional[str] = None
+) -> dict[str, Any]:
+    """Best audio-only stream: ORIGINAL LANGUAGE first, then highest bitrate.
+
+    *** WHY LANGUAGE COMES FIRST -- THIS WAS A REAL BUG ***
+    A MrBeast upload carried fourteen audio tracks: one English original
+    (language_preference=10) and thirteen dubs (-1), several of the dubs at a
+    higher bitrate. Selecting on bitrate alone chose the ARABIC dub, so the
+    whole video was transcribed into Arabic and every English query returned
+    "not found" -- with no error anywhere, because nothing had actually failed.
+
+    Set QUEST1_AUDIO_LANGUAGE to deliberately transcribe a specific dub; it is
+    honoured only if a track in that language exists, otherwise the original is
+    used rather than silently substituting something else.
 
     Falls back to a progressive format only if the host offers NO audio-only
     stream -- and then picks the LOWEST bitrate one, since every byte of that
@@ -395,7 +488,7 @@ def select_audio_format(formats: list[dict[str, Any]]) -> dict[str, Any]:
     """
     candidates = [f for f in formats if _usable(f) and _is_audio_only(f)]
     if candidates:
-        return max(candidates, key=lambda f: (f.get("abr") or f.get("tbr") or 0.0))
+        return max(candidates, key=lambda f: _track_rank(f, prefer_language))
 
     progressive = [
         f for f in formats
@@ -662,7 +755,7 @@ def resolve(
     if not formats:
         raise ResolveError(f"yt-dlp returned no playable formats for {url}.")
 
-    audio_fmt = select_audio_format(formats)
+    audio_fmt = select_audio_format(formats, config.AUDIO_TRACK_LANGUAGE)
     video_fmt = select_video_format(formats, max_height)
     audio = _to_choice(audio_fmt)
     video = _to_choice(video_fmt)
@@ -671,7 +764,8 @@ def resolve(
     report(
         progress_callback,
         STAGE,
-        f"selected audio format {audio.format_id} ({audio.ext}, {audio.abr or '?'}kbps) "
+        f"selected audio format {audio.format_id} "
+        f"({audio.ext}, {audio.abr or '?'}kbps, lang={audio.language or 'n/a'}) "
         f"and video format {video.format_id} ({video.ext}, {video.height or '?'}p)",
     )
 
@@ -698,7 +792,17 @@ def resolve(
         supports_http_ranges=supports_ranges,
         range_check_detail=range_detail,
         resolved_at=time.time(),
+        audio_track_count=count_audio_languages(formats),
     )
+    if resolved.audio_track_count > 1:
+        # Worth saying out loud: on these uploads the choice of track decides
+        # what language the transcript comes out in.
+        report(
+            progress_callback, STAGE,
+            f"{resolved.audio_track_count} audio tracks available; "
+            f"using {audio.language or 'original'} "
+            f"(set QUEST1_AUDIO_LANGUAGE to choose another)",
+        )
     report(progress_callback, STAGE, f"resolved media_key={resolved.media_key}")
     return resolved
 

@@ -253,6 +253,92 @@ def _download_audio(
     return produced[0]
 
 
+
+def _audio_track_signature(media: ResolvedMedia) -> dict[str, Any]:
+    """The identity of the audio track a wav was (or would be) built from.
+
+    Only fields that CHANGE THE SOUND belong here. The signed URL is excluded on
+    purpose -- it rotates constantly, and treating a new URL for the same track
+    as a different track would re-download the audio on every run.
+
+    USED BY: _audio_cache_is_stale and ensure_audio.
+    """
+    return {
+        "format_id": media.audio.format_id,
+        "language": media.audio.language,
+        "abr": media.audio.abr,
+        "ext": media.audio.ext,
+    }
+
+
+def _audio_cache_is_stale(media: ResolvedMedia) -> Optional[str]:
+    """Reason the cached wav no longer matches the track we would now pick, else None.
+
+    WHY THIS IS NEEDED: audio.wav used to be reused whenever it existed. When
+    the track selector was fixed to prefer the ORIGINAL language over the
+    highest bitrate, every already-cached wav built from a dub would have been
+    reused anyway, and rebuilding the index would have re-read the same wrong
+    audio. Existence is not freshness.
+
+    A wav with no sidecar is treated as stale ONLY when the source has more than
+    one audio track, so single-track videos cached before this existed are not
+    all re-downloaded for nothing.
+
+    USED BY: ensure_audio.
+    """
+    meta_file = paths.audio_meta_path(media.media_key)
+    wanted = _audio_track_signature(media)
+
+    if not meta_file.exists():
+        if getattr(media, "audio_track_count", 1) > 1:
+            return "cached audio predates track selection and this video has several tracks"
+        return None
+
+    try:
+        cached = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "audio.meta.json is unreadable"
+
+    if cached.get("format_id") != wanted["format_id"]:
+        return (f"cached audio came from format {cached.get('format_id')} "
+                f"(lang={cached.get('language')}), now selecting {wanted['format_id']} "
+                f"(lang={wanted['language']})")
+    return None
+
+
+def _write_audio_meta(media: ResolvedMedia) -> None:
+    """Record which track the wav on disk was built from. USED BY: ensure_audio."""
+    payload = _audio_track_signature(media)
+    payload["written_at"] = time.time()
+    meta_file = paths.audio_meta_path(media.media_key)
+    temp = meta_file.with_suffix(meta_file.suffix + ".part")
+    temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temp, meta_file)
+
+
+
+def _discard_derived_artifacts(media_key: str, progress_callback: Optional[ProgressCallback]) -> None:
+    """Delete the transcript and index built from a wav we are about to replace.
+
+    WHY THIS IS NOT OPTIONAL: the transcript is a pure function of the audio. If
+    the audio changes and the index does not, ensure_index finds a structurally
+    valid index -- right INDEX_VERSION, right schema, right word count -- and
+    reuses it without complaint. That is exactly what happened after the dub
+    fix: the English audio was re-fetched correctly and the Arabic transcript
+    was then served from cache, so the query still missed and nothing anywhere
+    reported an error.
+
+    Invalidating the input has to invalidate everything derived from it.
+
+    USED BY: ensure_audio, on the stale-cache path only.
+    """
+    for path in (paths.transcript_path(media_key), paths.index_path(media_key)):
+        if path.exists():
+            path.unlink()
+            report(progress_callback, STAGE_AUDIO,
+                   f"discarded {path.name} -- it was built from the previous audio")
+
+
 def ensure_audio(
     media: ResolvedMedia,
     *,
@@ -277,8 +363,16 @@ def ensure_audio(
     wav = paths.audio_path(media.media_key)
 
     if wav.exists() and wav.stat().st_size > 0 and not force:
-        report(progress_callback, STAGE_AUDIO, f"cache hit: {wav} ({wav.stat().st_size:,} bytes)")
-        return wav
+        stale = _audio_cache_is_stale(media)
+        if stale is None:
+            report(progress_callback, STAGE_AUDIO,
+                   f"cache hit: {wav} ({wav.stat().st_size:,} bytes, "
+                   f"lang={media.audio.language or 'n/a'})")
+            return wav
+        # Re-fetching is the whole point: a wav from the wrong track transcribes
+        # perfectly into the wrong language and every query then misses.
+        report(progress_callback, STAGE_AUDIO, f"re-fetching audio -- {stale}")
+        _discard_derived_artifacts(media.media_key, progress_callback)
 
     if media.audio.vcodec not in (None, "none"):
         report(
@@ -328,10 +422,11 @@ def ensure_audio(
             raise AudioError("ffmpeg reported success but produced an empty wav file.")
         os.replace(temp, wav)
         stats = _validate_wav(wav, media.duration)
+        _write_audio_meta(media)
         report(
             progress_callback, STAGE_AUDIO,
-            f"wrote {wav} -- {stats['size_bytes']:,} bytes, {stats['duration']:.1f}s "
-            f"in {time.time() - started:.1f}s",
+            f"wrote {wav} -- {stats['size_bytes']:,} bytes, {stats['duration']:.1f}s, "
+            f"lang={media.audio.language or 'n/a'} in {time.time() - started:.1f}s",
         )
         return wav
 
@@ -373,10 +468,11 @@ def ensure_audio(
 
     os.replace(temp, wav)
     stats = _validate_wav(wav, media.duration)
+    _write_audio_meta(media)
     report(
         progress_callback, STAGE_AUDIO,
-        f"wrote {wav} -- {stats['size_bytes']:,} bytes, {stats['duration']:.1f}s "
-        f"in {time.time() - started:.1f}s",
+        f"wrote {wav} -- {stats['size_bytes']:,} bytes, {stats['duration']:.1f}s, "
+        f"lang={media.audio.language or 'n/a'} in {time.time() - started:.1f}s",
     )
     return wav
 

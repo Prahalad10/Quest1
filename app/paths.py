@@ -91,6 +91,21 @@ def audio_path(media_key: str) -> Path:
     return media_dir(media_key) / "audio.wav"
 
 
+def audio_meta_path(media_key: str) -> Path:
+    """Records WHICH audio track audio.wav was made from.
+
+    WHY IT EXISTS: audio.wav used to be reused on existence alone. On a
+    multi-language upload that meant a wav built from the wrong track (a dub)
+    was reused forever, even after the selection bug that produced it was fixed
+    -- the index would rebuild happily from the same wrong audio. Comparing this
+    sidecar against the currently selected format is what makes the fix
+    actually reach existing caches.
+
+    USED BY: audio.py (writes and checks it).
+    """
+    return media_dir(media_key) / "audio.meta.json"
+
+
 def probe_path(media_key: str) -> Path:
     """ffprobe results for the video stream: fps, dimensions, VFR flag, source_url.
 
