@@ -1,0 +1,63 @@
+Prompts
+
+- Set 1 : Understanding the PS
+
+1. Analyze the problem statement fully. Break it down into what is required to build. Do not give anything regarding the implementation yet. (Document uploaded)
+
+2. Explain the core challenges and possible edge cases in short.
+
+- Set 2 : Research directions
+
+1. For the given example, it is a spoken dialogue at minute 5:25. So the problem statement is likely related to identifying spoken dialogues in the video. But on screen text is also a potential case. Based on this and the previous information, give a small overview on 3 different pipelines in which the problem can be solved. Do not send anything about the implementation yet, just tell about ideas/direction in which the problem can be solved.
+
+2. Pursuing pipeline 3 sounds reasonable. Give a rough idea on 3 different implementation strategies on how it can be implemented. The end goal is to create a GitHub repo where this code should be reproducible. And I want it to be hosted in a live website where when we put the link and text in the video we get the output in the mentioned format. Based on these, give 3 approaches. And it should not be like, approach 1, approach 2 which are 2 different modes and then approach 3 which is a balance between the first 2. The requirements are clearly mentioned, based on sending 3 similar but yet different architectures which solve the same problem in the same format but have its own strengths and weaknesses. I will then analyze all the 3 and choose a specific direction based on the properties of it.
+
+3. The primary goal is to solve the problem statement effectively. An end user who is using the website would benefit by looking at the progress check, and may search different dialogue from the same video again and again. So for these types of real time use cases, architecture 2 seems to be the best option. The complexity in code reproducibility is secondary. But the effectiveness in solving the problem seems to be best in architecture 2. Now explain architecture 2 in detail from start till end of implementation for clear understanding of the method.
+
+4. The difficult part seems to be the downloading of the video. Is it possible to remotely implement this architecture rather than downloading the video? Is it possible to refine the architecture where it is remotely doable, we proceed so, if not we download the video. Or whichever is less time consuming (In case remotely parsing the video is much more time consuming than downloading the video). Explain in short.
+
+5. The primary mode of input is likely to be a video with audio in it, like a youtube video. And in that video, at a random point the user inputted text will be SPOKEN as a dialogue. So based on the aforementioned information, is it possible to use remote in that case and if there is no match, only then we try to implement video based which is OCR.
+
+6. In implementation, what is the difference from the one mentioned previously where it is downloaded. Is the parsing part still the same or does it slightly differ now since it is remote instead of download. Also if we want to search repeatedly in the same video, how effectively can the remote method do it? Can indexing still be done? Or is it temporary? Or is it not possible? Explain any other such cases. Explain these in short.
+
+7. Based on these ideas, tell the refined architecture as a series of one line points. Also generate a rough architecture diagram
+
+- Set 3 : Implementation
+
+1. Now lets start the implementation part. I have opened a github repo called Quest1. I have created an empty folder in my desktop called Quest1. I plan to use claude code in my terminal to start the implementation. For all the changes made with each modification, make changes to the file but dont commit to the github profile. I will manually inspect the changes in github desktop and then commit to github. Also, do not create any prompts.txt or architecture diagram documentation. That can be done in the end after the successful implementation. I already have a template for it which can be refined. For the initial part of the implementation, the goal is to parse a given youtube video remotely and extract the frame in which an audio dialogue is spoken. That is the primary goal of this problem statement. Only when that implementation is complete, the extensions would be accounted for. While producing code, make it modular and step by step with proper validation and inspection. In any case of manual verification, give proper steps to do the checking for proper validation in the terminal itself. Don't code the entire architecture on go which would make it difficult to debug. Based on all these information and requirements and along with relevant context required to pursue future extensions, give a text to paste in the terminal for starting to develop the code
+
+2. The github repo is created and the folder is created. but it is not linked yet, so first link the repo to the folder in the terminal. and add the files to the repo, just dont commit it. do the proper github initialization in the terminal and update the files and add them to the repo, but dont commit and push them yet which will be done by my manual verification. update the text message to be copied accordingly
+
+3. Yeah the files are updated, proceed with the next step. Also, during the verification confirmation in each step, no need to direct me to how to manually verify the changes. Give me an update like message saying this step has been completed so that i can check the files are the correct ones as per the step. What I would like to check manually is the website at the end when we give a video link and text and it returns the output in the desired format. Focus only on spoken dialogue as the main goal of the project. The website has to be set up and tested locally before deploying and hosting it live.
+
+4. It is currently in step 3 . I want the progress till the check being made in the website. Give an additional piece of text mentioning that the code should be updated till the website being locally run and testing the video link and text there
+
+5. Proceed to step 7, but also add proper comments in all the code files for proper readability. Proper description of why each function is created and where it will be used.
+
+6. Continue to step 8. But also generate a document called Constants.txt in the main repo which contains all the constant values, thresholds, paramaters used in this model so far so that is is saved for reference and useful to make any necsssary changes further based on the observations.
+
+7. For the 19 seconds video its working fine. But for another random 10 minutes video, i tried searching a dialogue at 2:28 but the progress bar is stuck at 80% at speech recognition part for a while. Run a test of series for multiple different videos with dialogues at different parts of time from starting till ending and update the thresholds as required. Do not have a download option yet, use only remote parsing.
+
+8. Test the website now with a 10 minute video
+
+9. The process is complete still step 10 and an output website from the local system is now visible. But it is working good enough only for videos less than 5 minutes. It is time consuming for videos higher than that. And the final testing will be done on videos around 1 and half an hour duration with dialogue checked in between. I feel it would be better to have a download based approach. It would be easily implemented in the local system as it is the current requirement. Give a text to paste in the terminal to change the context and code accordingly. And ignore about the text displayed in screen problem. Keep the focus only on the audio spoken dialogue and implement solution based on that in context. The entire video parsing would be computationally heavy. But the goal is to extract the audio frame alone and first extracting the audio, and match that frame with a mapping with timeline or timestamp technique rather than parsing the entire video which is heavy. No need to download the entire video, but instead download the audio file and map the occurrence of the word to its frame directly using timestamp reference
+
+10. This is getting confusing, redo all the changes and keep it as it was at step 10.
+
+11. Save the current model as baseline.
+
+12. Change the limit of the video to more than one and half an hour. And it should respond within a minute or 2 even for long video searches. The dialogue search has to be done only in the audio file. And its corresponding frame has to be retrieved based on timestamp. Run a set of various different cases and report me as a table the times it took and if the output was success for each test case. And at the end test for the following URL, test for the dialogue "My mind rebels at stagnation". If a particular check takes too long, abort that run and report, takes more than 3 minutes. Keep 3 minutes as the threshold for each test case for output to be verified.
+
+13. This YouTube URL was tested with multiple sentences which I manually inspected being spoken in the video. But for every sentence it keeps giving not found as the output.
+
+14. Stop the ok.ru checking now. only fix the audio track problem and stop.
+
+15. Resolve the ok.ru problem
+
+16. The working for ok.ru is also now verified. The basic requirement is now met. As a next step, it is now to make the code base cleaner. Right now, the code base is messy and full of lots of stuff. We have a straightfoward goal, for a video with youtube or ok.ru link, extract audio with timestamp and send the frame. No need to perform OCR and visual search for text. For this current working model, keep the code straightforward and make it shorter by removing unnecesary modules. Determine with use cases whether each module would be useful for the current problem statement that is being addressed and remove it if it is either not used or unnecesary. Make the code clean, short and straightforward. Add limited comments, no need to comment throughout the entire document. Comment only when it is architecturally directly related. For small functionalities, give a one line comment not more than that. Once all the changes has been made, verify again for the above test cases if it is working similarly and update with a proper report.
+
+17. Is this model hostable using a live website without adding computational requirements to my device? The idea is a website in which anyone can post a URL which will prompt the user to download the audio track in their system first and then give a similar output to our model. Is it possible and doable?
+
+18. Make the following changes to the codebase, remove constants.txt as it was only for personal reference. The requried variables and thresholds are already set in config.py. Next, make the entire main source code inside a single folder called src. Apart from that, I will manually add a prompts.txt and Approach.pdf as part of the submission. Add the readme file which has all the information on how to run the solution and reproduce the results. Then keep the other files such as config, assests outputs etc. So after the changes the repo should have src, readme and other files such as config, assets, outputs etc. After that I will manually add the Aproach.pdf and prompts.txt
+
+19. Put the outputs folder in github to showcase the formats of the json and other stuff from the actual outputs and data.
